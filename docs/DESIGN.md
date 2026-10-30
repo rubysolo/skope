@@ -28,7 +28,7 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 ## Findings
 
 - Identity: (project, vulnerability, package name). The version is an attribute, updated in place.
-- A vulnerability is the connected group of advisories linked by aliases (EEF-CVE-… ↔ GHSA-… ↔ CVE-…). Its key is the smallest ID in the group, so a CVE ID when there is one. One finding per vulnerability: severity is the highest among its matching advisories, and ignoring it ignores all of them. Added 2026-10-30 after a real Hex repo showed 23 of 60 findings were alias pairs.
+- A vulnerability is the connected group of advisories linked by aliases (EEF-CVE-… ↔ GHSA-… ↔ CVE-…). Its key is the smallest CVE ID in the group, or the smallest advisory ID when there is no CVE (other aliases, like Bitnami's BIT-…, never become the key). When a new advisory merges two groups, open findings are re-keyed in place, not resolved and reopened. One finding per vulnerability: severity is the highest among its matching advisories, and ignoring it ignores all of them. Added 2026-10-30 after a real Hex repo showed 23 of 60 findings were alias pairs.
 - Matching runs after every sync (changed advisories × all inventories) and after every report (that inventory × all advisories).
 - Resolved when no affected version remains or every advisory is withdrawn; recurrence is a new finding.
 - Ignored with a reason and optional expiry; reactivated when any of its advisories changes.
