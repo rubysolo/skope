@@ -27,7 +27,10 @@ var schemaV1 string
 // migrations[i] takes the database from user_version i to i+1.
 var migrations = []string{schemaV1}
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound = errors.New("not found")
+	ErrExists   = errors.New("already exists")
+)
 
 type Store struct {
 	db  *sql.DB
@@ -136,7 +139,7 @@ func (t *Tx) CreateProject(name string) (Project, string, error) {
 		name, hashToken(token), t.now)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
-			return Project{}, "", fmt.Errorf("project %q already exists", name)
+			return Project{}, "", fmt.Errorf("project %q %w", name, ErrExists)
 		}
 		return Project{}, "", err
 	}
