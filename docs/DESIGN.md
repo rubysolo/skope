@@ -31,12 +31,12 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 - A vulnerability is the connected group of advisories linked by aliases (EEF-CVE-… ↔ GHSA-… ↔ CVE-…). Its key is the smallest ID in the group, so a CVE ID when there is one. One finding per vulnerability: severity is the highest among its matching advisories, and ignoring it ignores all of them. Added 2026-10-30 after a real Hex repo showed 23 of 60 findings were alias pairs.
 - Matching runs after every sync (changed advisories × all inventories) and after every report (that inventory × all advisories).
 - Resolved when no affected version remains or every advisory is withdrawn; recurrence is a new finding.
-- Ignored with a reason and optional expiry; reactivated when its advisory changes.
+- Ignored with a reason and optional expiry; reactivated when any of its advisories changes.
 - Each finding records the report that introduced it.
 
 ## Alerts
 
-- One batched alert per sync run or report, grouped by advisory.
+- One batched alert per sync run or report, grouped by vulnerability.
 - Email (SMTP): every new and resolved finding.
 - ntfy (publish to a topic, token auth): new findings that are high/critical, unknown severity, or malicious. Malicious → priority 5, otherwise 4.
 - Stale project: alert after 30 days without a report (configurable per project), then weekly.
