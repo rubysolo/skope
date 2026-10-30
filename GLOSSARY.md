@@ -38,7 +38,11 @@ _Avoid_: Language, platform
 
 **Advisory**:
 A published record describing a vulnerability and the package versions it affects. A CVE ID is one possible alias of an advisory, not the advisory itself.
-_Avoid_: CVE, vulnerability, vuln
+_Avoid_: CVE, vuln
+
+**Vulnerability**:
+A single flaw, as identified by the group of advisories that name each other (or a shared CVE) as aliases. Several databases often publish the same vulnerability; Skope counts it once.
+_Avoid_: CVE, advisory group, issue
 
 **Malicious Package Advisory**:
 An advisory stating that a package release was published with malicious intent, as opposed to containing an accidental flaw. Always treated as critical.
@@ -51,15 +55,15 @@ _Avoid_: Download, import, fetch
 ### Findings and alerts
 
 **Finding**:
-The fact that a project's inventory contains a version of a package affected by an advisory. Identified by project, advisory and package name; the version is not part of its identity.
+The fact that a project's inventory contains a version of a package affected by a vulnerability. Identified by project, vulnerability and package name; the version is not part of its identity.
 _Avoid_: Match, hit, issue, vulnerability
 
 **Resolved**:
-The state of a finding whose project no longer contains an affected version, or whose advisory was withdrawn. A finding that recurs after resolution is a new finding.
+The state of a finding whose project no longer contains an affected version, or whose advisories were all withdrawn. A finding that recurs after resolution is a new finding.
 _Avoid_: Closed, fixed
 
 **Ignored**:
-The state of a finding the operator has muted, with a reason and an optional expiry. A change to its advisory makes it active again.
+The state of a finding the operator has muted, with a reason and an optional expiry. A change to any of its vulnerability's advisories makes it active again.
 _Avoid_: Suppressed, snoozed, acknowledged
 
 **Alert**:

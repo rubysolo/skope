@@ -27,9 +27,10 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 
 ## Findings
 
-- Identity: (project, advisory, package name). The version is an attribute, updated in place.
+- Identity: (project, vulnerability, package name). The version is an attribute, updated in place.
+- A vulnerability is the connected group of advisories linked by aliases (EEF-CVE-… ↔ GHSA-… ↔ CVE-…). Its key is the smallest ID in the group, so a CVE ID when there is one. One finding per vulnerability: severity is the highest among its matching advisories, and ignoring it ignores all of them. Added 2026-10-30 after a real Hex repo showed 23 of 60 findings were alias pairs.
 - Matching runs after every sync (changed advisories × all inventories) and after every report (that inventory × all advisories).
-- Resolved when no affected version remains or the advisory is withdrawn; recurrence is a new finding.
+- Resolved when no affected version remains or every advisory is withdrawn; recurrence is a new finding.
 - Ignored with a reason and optional expiry; reactivated when its advisory changes.
 - Each finding records the report that introduced it.
 
@@ -53,6 +54,10 @@ Project tokens are `skope_`-prefixed random strings, stored as SHA-256 hashes; o
 - Composite action `rubysolo/skope/report@v1`: runs syft on the checkout, posts the report, prints findings, optional `fail-on`.
 - Triggered on push to the default branch, weekly `schedule:`, and `workflow_dispatch`.
 - Agent skill `skills/skope-ci/SKILL.md`: `skope project add` → `gh secret set SKOPE_TOKEN` → add the workflow. The token is never echoed.
+
+## Later
+
+- Container images: an optional `image:` input on the action runs syft on the built image; Skope adds Alpine/Debian/Ubuntu, mapping the purl's `distro=` qualifier to OSV's ecosystem (e.g. `Alpine:v3.20`). Needs a noise policy for unfixed distro advisories. Will revise ADR-0001's scope.
 
 ## Release and hosting
 
