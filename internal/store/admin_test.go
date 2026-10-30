@@ -32,7 +32,7 @@ func TestArchiveProject(t *testing.T) {
 	st.Tx(context.Background(), func(tx *Tx) error {
 		p, token, _ := tx.CreateProject("cure")
 		rid, _ := tx.RecordReport(p.ID, ReportMeta{}, []pkgid.Package{{Ecosystem: "Hex", Name: "plug", Version: "1.0.0"}})
-		tx.InsertFinding(Finding{ProjectID: p.ID, AdvisoryID: "A", Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1.0.0", Severity: "high"}, rid)
+		tx.InsertFinding(Finding{ProjectID: p.ID, VulnID: "A", Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1.0.0", Severity: "high"}, rid)
 
 		if err := tx.ArchiveProject(p.ID); err != nil {
 			t.Fatal(err)
@@ -58,7 +58,7 @@ func TestDeleteProjectCascades(t *testing.T) {
 	st.Tx(context.Background(), func(tx *Tx) error {
 		p, _, _ := tx.CreateProject("cure")
 		rid, _ := tx.RecordReport(p.ID, ReportMeta{}, []pkgid.Package{{Ecosystem: "Hex", Name: "plug", Version: "1.0.0"}})
-		tx.InsertFinding(Finding{ProjectID: p.ID, AdvisoryID: "A", Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1.0.0", Severity: "high"}, rid)
+		tx.InsertFinding(Finding{ProjectID: p.ID, VulnID: "A", Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1.0.0", Severity: "high"}, rid)
 		if err := tx.DeleteProject(p.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -77,7 +77,7 @@ func TestFindingViewsOrder(t *testing.T) {
 	st.Tx(context.Background(), func(tx *Tx) error {
 		p, _, _ := tx.CreateProject("cure")
 		for _, f := range []struct{ adv, sev string }{{"LOW", "low"}, {"CRIT", "critical"}, {"UNK", "unknown"}, {"HIGH", "high"}} {
-			tx.InsertFinding(Finding{ProjectID: p.ID, AdvisoryID: f.adv, Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1", Severity: f.sev}, 0)
+			tx.InsertFinding(Finding{ProjectID: p.ID, VulnID: f.adv, Ecosystem: "Hex", NameKey: "plug", Name: "plug", Versions: "1", Severity: f.sev}, 0)
 		}
 		views, err := tx.FindingViews(FindingFilter{ProjectID: p.ID})
 		if err != nil {
@@ -85,7 +85,7 @@ func TestFindingViewsOrder(t *testing.T) {
 		}
 		var got []string
 		for _, v := range views {
-			got = append(got, v.AdvisoryID)
+			got = append(got, v.VulnID)
 		}
 		if want := "CRIT HIGH UNK LOW"; strings.Join(got, " ") != want {
 			t.Errorf("order = %v, want %s", got, want)

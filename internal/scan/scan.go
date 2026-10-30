@@ -1,10 +1,12 @@
 // Package scan matches inventories against advisories and keeps findings in
-// step: opening, updating, resolving and reactivating them.
+// step: opening, updating, resolving and reactivating them. Findings are per
+// vulnerability, so advisories that alias each other produce one finding.
 package scan
 
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -19,7 +21,7 @@ type Kind int
 const (
 	Opened Kind = iota
 	Resolved
-	// Reactivated is an ignored finding whose advisory has since changed.
+	// Reactivated is an ignored finding whose vulnerability has since changed.
 	Reactivated
 )
 
@@ -31,13 +33,43 @@ type Change struct {
 	FindingID int64
 	ProjectID int64
 	Project   string
-	Advisory  *osv.Advisory
-	Ecosystem string
-	Name      string
-	Versions  string
-	Severity  osv.Severity
+	VulnID    string
+	// Advisories are the vulnerability's advisories that matched (for a
+	// resolution, the ones that last matched), sorted by id.
+	Advisories []*osv.Advisory
+	Ecosystem  string
+	Name       string
+	Versions   string
+	Severity   osv.Severity
 	// Quiet marks the resolution of an ignored finding: recorded, not announced.
 	Quiet bool
+}
+
+// Summary is the first summary any of the advisories gives.
+func (c Change) Summary() string {
+	for _, a := range c.Advisories {
+		if a.Summary != "" {
+			return a.Summary
+		}
+	}
+	return ""
+}
+
+// Malicious reports whether any advisory calls the package malicious.
+func (c Change) Malicious() bool {
+	return slices.ContainsFunc(c.Advisories, (*osv.Advisory).Malicious)
+}
+
+// Identifiers lists every id the vulnerability is known by: its advisories
+// and their aliases (CVE ids included), sorted.
+func (c Change) Identifiers() []string {
+	ids := []string{c.VulnID}
+	for _, a := range c.Advisories {
+		ids = append(ids, a.ID)
+		ids = append(ids, a.Aliases...)
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 type Scanner struct {
@@ -47,28 +79,46 @@ type Scanner struct {
 func New(st *store.Store) *Scanner { return &Scanner{st: st} }
 
 type key struct {
-	projectID  int64
-	advisoryID string
-	ecosystem  string
-	nameKey    string
+	projectID int64
+	vulnID    string
+	ecosystem string
+	nameKey   string
 }
 
 type match struct {
+	group    store.VulnGroup
 	name     string
 	versions []string
-	adv      *osv.Advisory
+	advs     []*osv.Advisory
 }
 
 type matches map[key]*match
 
-func (m matches) add(projectID int64, adv *osv.Advisory, p pkgid.Package) {
-	k := key{projectID, adv.ID, p.Ecosystem, p.Key()}
+func (m matches) add(projectID int64, g store.VulnGroup, adv *osv.Advisory, p pkgid.Package) {
+	k := key{projectID, g.Key, p.Ecosystem, p.Key()}
 	if m[k] == nil {
-		m[k] = &match{name: p.Name, adv: adv}
+		m[k] = &match{group: g, name: p.Name}
 	}
 	if !slices.Contains(m[k].versions, p.Version) {
 		m[k].versions = append(m[k].versions, p.Version)
 	}
+	if !slices.Contains(m[k].advs, adv) {
+		m[k].advs = append(m[k].advs, adv)
+	}
+}
+
+// finding describes the match as the finding it should be.
+func (m *match) finding(k key) store.Finding {
+	slices.SortFunc(m.advs, func(a, b *osv.Advisory) int { return strings.Compare(a.ID, b.ID) })
+	var ids []string
+	severity := osv.Unknown
+	for _, a := range m.advs {
+		ids = append(ids, a.ID)
+		severity = max(severity, a.Severity())
+	}
+	c := Change{Advisories: m.advs}
+	return store.Finding{ProjectID: k.projectID, VulnID: k.vulnID, AdvisoryIDs: strings.Join(ids, ","), Summary: c.Summary(),
+		Ecosystem: k.ecosystem, NameKey: k.nameKey, Name: m.name, Versions: strings.Join(m.versions, ", "), Severity: severity.String()}
 }
 
 // affects wraps Advisory.Affects; an advisory Skope can't evaluate is logged
@@ -91,6 +141,7 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 			return err
 		}
 		advs := advisoryCache{tx: tx}
+		groups := map[string]store.VulnGroup{}
 		found := matches{}
 		for _, p := range pkgs {
 			ids, err := tx.AdvisoryIDsFor(p.Ecosystem, p.Key())
@@ -102,9 +153,17 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 				if err != nil {
 					return err
 				}
-				if affects(adv, p) {
-					found.add(projectID, adv, p)
+				if !affects(adv, p) {
+					continue
 				}
+				g, ok := groups[id]
+				if !ok {
+					if g, err = tx.VulnGroup(id); err != nil {
+						return err
+					}
+					groups[id] = g
+				}
+				found.add(projectID, g, adv, p)
 			}
 		}
 		open, err := tx.OpenFindingsForProject(projectID)
@@ -117,16 +176,27 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 	return changes, err
 }
 
-// Advisories matches new or modified advisories against every active
-// project's inventory.
+// Advisories matches new or modified advisories — and the rest of each one's
+// vulnerability — against every active project's inventory.
 func (s *Scanner) Advisories(ctx context.Context, ids []string) ([]Change, error) {
 	var all []Change
 	// A first sync hands over every advisory in an ecosystem (npm has ~230k),
 	// so work in batches rather than one transaction per advisory.
 	for batch := range slices.Chunk(ids, 500) {
 		err := s.st.Tx(ctx, func(tx *store.Tx) error {
+			done := map[string]bool{}
 			for _, id := range batch {
-				changes, err := matchAdvisory(tx, id)
+				if done[id] {
+					continue
+				}
+				g, err := tx.VulnGroup(id)
+				if err != nil {
+					return err
+				}
+				for _, a := range g.Advisories {
+					done[a] = true
+				}
+				changes, err := matchVuln(tx, g)
 				if err != nil {
 					return err
 				}
@@ -141,25 +211,29 @@ func (s *Scanner) Advisories(ctx context.Context, ids []string) ([]Change, error
 	return all, nil
 }
 
-func matchAdvisory(tx *store.Tx, id string) ([]Change, error) {
+func matchVuln(tx *store.Tx, g store.VulnGroup) ([]Change, error) {
 	advs := advisoryCache{tx: tx}
-	adv, err := advs.get(id)
-	if err != nil {
-		return nil, err
-	}
 	found := matches{}
-	for _, ref := range adv.Packages() {
-		entries, err := tx.InventoryUsing(ref)
+	for _, id := range g.Advisories {
+		adv, err := advs.get(id)
 		if err != nil {
 			return nil, err
 		}
-		for _, e := range entries {
-			if affects(adv, e.Package) {
-				found.add(e.ProjectID, adv, e.Package)
+		for _, ref := range adv.Packages() {
+			entries, err := tx.InventoryUsing(ref)
+			if err != nil {
+				return nil, err
+			}
+			for _, e := range entries {
+				if affects(adv, e.Package) {
+					found.add(e.ProjectID, g, adv, e.Package)
+				}
 			}
 		}
 	}
-	open, err := tx.OpenFindingsForAdvisory(id)
+	// Every identifier, not just the key: a finding opened before two groups
+	// merged is keyed by the old, larger id, and must be reconciled here too.
+	open, err := tx.OpenFindingsForVulns(g.Identifiers)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +246,7 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 	reportID func(projectID int64) (int64, error)) ([]Change, error) {
 
 	names := map[int64]string{}
-	change := func(kind Kind, f store.Finding, adv *osv.Advisory) (Change, error) {
+	change := func(kind Kind, f store.Finding, matched []*osv.Advisory) (Change, error) {
 		name, ok := names[f.ProjectID]
 		if !ok {
 			var err error
@@ -181,23 +255,30 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 			}
 			names[f.ProjectID] = name
 		}
-		return Change{Kind: kind, FindingID: f.ID, ProjectID: f.ProjectID, Project: name, Advisory: adv,
+		return Change{Kind: kind, FindingID: f.ID, ProjectID: f.ProjectID, Project: name, VulnID: f.VulnID, Advisories: matched,
 			Ecosystem: f.Ecosystem, Name: f.Name, Versions: f.Versions, Severity: osv.ParseSeverity(f.Severity)}, nil
+	}
+
+	open, err := rekey(tx, open)
+	if err != nil {
+		return nil, err
 	}
 
 	var changes []Change
 	for _, f := range open {
-		k := key{f.ProjectID, f.AdvisoryID, f.Ecosystem, f.NameKey}
+		k := key{f.ProjectID, f.VulnID, f.Ecosystem, f.NameKey}
 		m, still := found[k]
 		if !still {
 			if err := tx.ResolveFinding(f.ID); err != nil {
 				return nil, err
 			}
-			adv, err := advs.get(f.AdvisoryID)
-			if err != nil {
-				return nil, err
+			var last []*osv.Advisory
+			for _, id := range strings.Split(f.AdvisoryIDs, ",") {
+				if a, err := advs.get(id); err == nil {
+					last = append(last, a)
+				}
 			}
-			c, err := change(Resolved, f, adv)
+			c, err := change(Resolved, f, last)
 			if err != nil {
 				return nil, err
 			}
@@ -207,18 +288,26 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 		}
 		delete(found, k)
 
-		versions, severity := strings.Join(m.versions, ", "), m.adv.Severity().String()
-		if versions != f.Versions || severity != f.Severity {
-			if err := tx.UpdateFinding(f.ID, versions, severity); err != nil {
+		want := m.finding(k)
+		want.ID = f.ID
+		if want.AdvisoryIDs != f.AdvisoryIDs || want.Summary != f.Summary || want.Versions != f.Versions || want.Severity != f.Severity {
+			if err := tx.UpdateFinding(want); err != nil {
 				return nil, err
 			}
-			f.Versions, f.Severity = versions, severity
 		}
-		if f.IgnoredReason != "" && f.IgnoredModified != m.adv.Modified {
+		if f.IgnoredReason == "" {
+			continue
+		}
+		modified, err := tx.VulnModified(m.group.Advisories)
+		if err != nil {
+			return nil, err
+		}
+		if f.IgnoredModified != modified {
 			if err := tx.Unignore(f.ID); err != nil {
 				return nil, err
 			}
-			c, err := change(Reactivated, f, m.adv)
+			want.ProjectID = f.ProjectID
+			c, err := change(Reactivated, want, m.advs)
 			if err != nil {
 				return nil, err
 			}
@@ -227,8 +316,7 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 	}
 
 	for k, m := range found {
-		f := store.Finding{ProjectID: k.projectID, AdvisoryID: k.advisoryID, Ecosystem: k.ecosystem, NameKey: k.nameKey,
-			Name: m.name, Versions: strings.Join(m.versions, ", "), Severity: m.adv.Severity().String()}
+		f := m.finding(k)
 		rid, err := reportID(k.projectID)
 		if err != nil {
 			return nil, err
@@ -236,7 +324,7 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 		if f.ID, err = tx.InsertFinding(f, rid); err != nil {
 			return nil, err
 		}
-		c, err := change(Opened, f, m.adv)
+		c, err := change(Opened, f, m.advs)
 		if err != nil {
 			return nil, err
 		}
@@ -244,10 +332,55 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 	}
 
 	slices.SortFunc(changes, func(a, b Change) int {
-		return cmp.Or(cmp.Compare(a.ProjectID, b.ProjectID), cmp.Compare(a.Advisory.ID, b.Advisory.ID),
+		return cmp.Or(cmp.Compare(a.ProjectID, b.ProjectID), cmp.Compare(a.VulnID, b.VulnID),
 			cmp.Compare(a.Name, b.Name), cmp.Compare(a.Kind, b.Kind))
 	})
 	return changes, nil
+}
+
+// rekey moves open findings to their vulnerability's current key. A key
+// changes when a new advisory joins two alias groups; without this the
+// finding would resolve under the old key and reopen under the new one,
+// alerting twice about one vulnerability.
+func rekey(tx *store.Tx, open []store.Finding) ([]store.Finding, error) {
+	groups := map[string]string{}
+	held := map[key]bool{}
+	for _, f := range open {
+		held[key{f.ProjectID, f.VulnID, f.Ecosystem, f.NameKey}] = true
+	}
+	out := open[:0:0]
+	for _, f := range open {
+		current, ok := groups[f.VulnID]
+		if !ok {
+			g, err := tx.VulnGroup(f.VulnID)
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				current = f.VulnID // no advisory answers to it any more; it will resolve
+			case err != nil:
+				return nil, err
+			default:
+				current = g.Key
+			}
+			groups[f.VulnID] = current
+		}
+		if current != f.VulnID {
+			to := key{f.ProjectID, current, f.Ecosystem, f.NameKey}
+			if held[to] {
+				// Already tracked under the new key: this one is a leftover.
+				if err := tx.ResolveFinding(f.ID); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if err := tx.RekeyFinding(f.ID, current); err != nil {
+				return nil, err
+			}
+			held[to] = true
+			f.VulnID = current
+		}
+		out = append(out, f)
+	}
+	return out, nil
 }
 
 type advisoryCache struct {

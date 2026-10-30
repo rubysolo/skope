@@ -151,7 +151,7 @@ var findingListCmd = &cobra.Command{
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSEVERITY\tPROJECT\tPACKAGE\tVERSIONS\tADVISORY\tSTATUS")
+		fmt.Fprintln(w, "ID\tSEVERITY\tPROJECT\tPACKAGE\tVERSIONS\tVULNERABILITY\tSTATUS")
 		for _, f := range fs {
 			status := "open"
 			switch {
@@ -160,7 +160,7 @@ var findingListCmd = &cobra.Command{
 			case f.Ignored != nil:
 				status = "ignored: " + f.Ignored.Reason
 			}
-			fmt.Fprintf(w, "%d\t%s\t%s\t%s/%s\t%s\t%s\t%s\n", f.ID, f.Severity, f.Project, f.Ecosystem, f.Package, f.Versions, f.Advisory, status)
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s/%s\t%s\t%s\t%s\n", f.ID, f.Severity, f.Project, f.Ecosystem, f.Package, f.Versions, f.Vulnerability, status)
 		}
 		return w.Flush()
 	},

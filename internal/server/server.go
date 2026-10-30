@@ -38,7 +38,7 @@ type LogNotifier struct{}
 
 func (LogNotifier) Notify(_ context.Context, changes []scan.Change) {
 	for _, c := range changes {
-		slog.Info("finding "+c.Kind.String(), "project", c.Project, "advisory", c.Advisory.ID,
+		slog.Info("finding "+c.Kind.String(), "project", c.Project, "vulnerability", c.VulnID,
 			"package", c.Name, "versions", c.Versions, "severity", c.Severity, "quiet", c.Quiet)
 	}
 }
@@ -172,7 +172,9 @@ func toAPIProject(p store.Project) api.Project {
 }
 
 func toAPIFinding(v store.FindingView) api.Finding {
-	f := api.Finding{ID: v.ID, Project: v.Project, Advisory: v.AdvisoryID, Summary: v.Summary, URL: api.AdvisoryURL(v.AdvisoryID),
+	advisories := strings.Split(v.AdvisoryIDs, ",")
+	f := api.Finding{ID: v.ID, Project: v.Project, Vulnerability: v.VulnID, Advisories: advisories, Summary: v.Summary,
+		URL:       api.AdvisoryURL(advisories[0]),
 		Ecosystem: v.Ecosystem, Package: v.Name, Versions: v.Versions, Severity: v.Severity,
 		OpenedAt: v.OpenedAt, ResolvedAt: v.ResolvedAt}
 	if v.IgnoredReason != "" {
@@ -394,7 +396,11 @@ func (s *Server) ignoreFinding(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		modified, err := tx.AdvisoryModified(f.AdvisoryID)
+		g, err := tx.VulnGroup(f.VulnID)
+		if err != nil {
+			return err
+		}
+		modified, err := tx.VulnModified(g.Advisories)
 		if err != nil {
 			return err
 		}

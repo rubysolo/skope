@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -178,10 +179,67 @@ func TestChangeCarriesAlertContext(t *testing.T) {
 	p := e.project("cure")
 	e.advisory("MAL-2026-1", "2026-01-01T00:00:00Z", "plugg", "0", "9.9.9", "")
 	c := e.report(p, "plugg@1.0.0")[0]
-	if c.Advisory.ID != "MAL-2026-1" || c.Severity != osv.Critical || !c.Advisory.Malicious() || c.Ecosystem != "Hex" {
+	if c.VulnID != "MAL-2026-1" || c.Severity != osv.Critical || !c.Malicious() || c.Ecosystem != "Hex" {
 		t.Errorf("change = %+v", c)
 	}
 	if c.Quiet {
 		t.Error("a new finding is never quiet")
 	}
+}
+
+func TestAliasedAdvisoriesAreOneFinding(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	// The Hex shape: EEF lists the GHSA, the GHSA lists the CVE.
+	e.advisory("EEF-CVE-2026-1", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0",
+		`"aliases": ["GHSA-aaaa"], "database_specific": {"severity": "MODERATE"},`)
+	e.advisory("GHSA-aaaa", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0",
+		`"aliases": ["CVE-2026-1"], "database_specific": {"severity": "HIGH"},`)
+
+	changes := e.report(p, "plug@1.2.0")
+	expect(t, "two advisories, one vulnerability", changes, "opened cure plug@1.2.0;")
+	c := changes[0]
+	if c.VulnID != "CVE-2026-1" || c.Severity != osv.High || len(c.Advisories) != 2 {
+		t.Errorf("change = %+v (want key CVE-2026-1, highest severity, both advisories)", c)
+	}
+	if ids := c.Identifiers(); !slices.Equal(ids, []string{"CVE-2026-1", "EEF-CVE-2026-1", "GHSA-aaaa"}) {
+		t.Errorf("Identifiers() = %v", ids)
+	}
+
+	expect(t, "one advisory withdrawn, the other still applies",
+		e.advisory("GHSA-aaaa", "2026-02-01T00:00:00Z", "plug", "1.0.0", "1.5.0", `"aliases": ["CVE-2026-1"], "withdrawn": "2026-02-01T00:00:00Z",`), "")
+	if f := e.open(p)[0]; f.AdvisoryIDs != "EEF-CVE-2026-1" || f.Severity != "medium" {
+		t.Errorf("finding should narrow to the remaining advisory: %+v", f)
+	}
+}
+
+func TestIgnoringAVulnerabilityCoversItsAliases(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.advisory("EEF-CVE-2026-1", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", `"aliases": ["GHSA-aaaa"],`)
+	e.advisory("GHSA-aaaa", "2026-01-02T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	e.report(p, "plug@1.2.0")
+	f := e.open(p)[0]
+	e.tx(func(tx *store.Tx) error { return tx.IgnoreFinding(f.ID, "unreachable", "", "2026-01-02T00:00:00Z") })
+
+	expect(t, "re-report", e.report(p, "plug@1.3.0"), "")
+	expect(t, "the other advisory changes", e.advisory("EEF-CVE-2026-1", "2026-03-01T00:00:00Z", "plug", "1.0.0", "1.6.0", `"aliases": ["GHSA-aaaa"],`),
+		"reactivated cure plug@1.3.0;")
+}
+
+func TestMergingAliasGroupsDoesNotRealert(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.advisory("GHSA-aaaa", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	expect(t, "first advisory", e.report(p, "plug@1.2.0"), "opened cure plug@1.2.0;")
+
+	// A second database publishes the same flaw, naming the GHSA and a CVE:
+	// the vulnerability's key becomes the CVE.
+	changes := e.advisory("EEF-CVE-2026-1", "2026-01-05T00:00:00Z", "plug", "1.0.0", "1.5.0", `"aliases": ["GHSA-aaaa", "CVE-2026-1"],`)
+	expect(t, "group grows", changes, "")
+	fs := e.open(p)
+	if len(fs) != 1 || fs[0].VulnID != "CVE-2026-1" || fs[0].AdvisoryIDs != "EEF-CVE-2026-1,GHSA-aaaa" {
+		t.Errorf("finding should be re-keyed in place: %+v", fs)
+	}
+	expect(t, "next report", e.report(p, "plug@1.2.0"), "")
 }
