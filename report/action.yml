@@ -16,7 +16,7 @@ inputs:
     description: Directory to scan, for monorepos with one skope project per app.
     default: .
   image:
-    description: Container image to scan instead of the checkout (e.g. ghcr.io/me/app:${{ github.sha }}), from the local Docker daemon or a registry. Reported as its own source, so it doesn't replace the repository's report.
+    description: Container image to scan instead of the checkout (e.g. ghcr.io/me/app:<commit sha>), from the local Docker daemon or a registry. Reported as its own source, so it doesn't replace the repository's report.
     default: ""
   fail-on:
     description: Fail the step when an open, unignored finding with a fix is at least this severe (low, medium, high, critical). Empty never fails.

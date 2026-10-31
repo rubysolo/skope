@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # GitHub evaluates ${{ }} even in an action's descriptions, and one there
+      # stops the action from loading at all.
+      - name: No expressions in the action's descriptions
+        run: '! grep -nE "description:.*[$][{][{]" report/action.yml'
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
