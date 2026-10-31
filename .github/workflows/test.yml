@@ -32,3 +32,29 @@ jobs:
 
       - name: Run tests
         run: go test -race ./...
+
+  # Builds every release artifact, images included, without publishing, so a
+  # broken Dockerfile or GoReleaser config fails here rather than on a tag.
+  release-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+
+      - name: Smoke-test the image
+        run: docker run --rm "$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 'skope:.*-amd64')" version

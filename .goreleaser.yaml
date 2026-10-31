@@ -1,0 +1,59 @@
+version: 2
+project_name: skope
+
+before:
+  hooks:
+    - go mod tidy
+
+git:
+  # The floating major tags the report action is used by (v0, v1, …) point at
+  # release commits too; they aren't releases.
+  ignore_tags:
+    - "v0"
+    - "v1"
+    - "v2"
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/rubysolo/skope/cmd.Version={{.Version}} -X github.com/rubysolo/skope/cmd.Commit={{.ShortCommit}} -X github.com/rubysolo/skope/cmd.Date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+dockers_v2:
+  - images:
+      - ghcr.io/rubysolo/skope
+    tags:
+      - "{{ .Version }}"
+      - "v{{ .Major }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - deploy/litestream.yml
+      - deploy/entrypoint.sh
+    labels:
+      org.opencontainers.image.source: https://github.com/rubysolo/skope
+      org.opencontainers.image.description: Small self-hosted dependency vulnerability watcher
+      org.opencontainers.image.licenses: MIT
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge pull request"
+      - "\\[skip ci\\]"

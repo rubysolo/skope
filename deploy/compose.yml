@@ -1,0 +1,18 @@
+# skope on a single host behind your reverse proxy (Caddy, nginx, …), which
+# terminates TLS and forwards to 127.0.0.1:8080.
+#
+#   cp skope.env.example skope.env   # then fill it in
+#   docker compose up -d
+services:
+  skope:
+    image: ghcr.io/rubysolo/skope:v0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file: skope.env
+    volumes:
+      - skope-data:/data
+    stop_grace_period: 30s
+
+volumes:
+  skope-data:
