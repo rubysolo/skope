@@ -19,11 +19,15 @@ The secret credential a project's CI uses to report its inventory to Skope.
 _Avoid_: API key, secret
 
 **Inventory**:
-The complete set of packages a project depends on, as of its most recent report. Each report replaces the previous inventory entirely.
+The complete set of packages a project depends on: the union of the latest report from each of its sources.
 _Avoid_: Dependency list, SBOM, manifest, snapshot
 
+**Source**:
+Where a project's packages are read from: its repository's lockfiles, or one of the container images it ships. Each source's report replaces only that source's part of the inventory.
+_Avoid_: Target, origin, scan type
+
 **Report**:
-A single submission of a project's inventory from CI.
+A single submission, from CI, of the packages found in one of a project's sources.
 _Avoid_: Upload, post, scan
 
 **Package**:
@@ -31,7 +35,7 @@ A specific name and version within an ecosystem, identified by a purl (e.g. `pkg
 _Avoid_: Dependency, component, library
 
 **Ecosystem**:
-A package registry with its own naming and version-ordering rules (Hex, crates.io, RubyGems, npm, Go modules, PyPI).
+A package registry with its own naming and version-ordering rules: Hex, crates.io, RubyGems, npm, Go modules and PyPI, plus each release of an operating system distribution (Alpine v3.24, Debian 12).
 _Avoid_: Language, platform
 
 ### Vulnerabilities
@@ -61,6 +65,10 @@ _Avoid_: Match, hit, issue, vulnerability
 **Resolved**:
 The state of a finding whose project no longer contains an affected version, or whose advisories were all withdrawn. A finding that recurs after resolution is a new finding.
 _Avoid_: Closed, fixed
+
+**Unfixed**:
+The state of a finding none of whose advisories names a version that fixes it. An unfixed finding is tracked but not alerted on until a fix is published, unless a package is malicious.
+_Avoid_: Won't-fix, pending, open
 
 **Ignored**:
 The state of a finding the operator has muted, with a reason and an optional expiry. A change to any of its vulnerability's advisories makes it active again.
