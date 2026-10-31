@@ -12,8 +12,16 @@
       "description": "Connect repositories to a skope server: registers the project, stores its token as a GitHub secret, and adds the CI workflow that reports dependencies.",
       "homepage": "https://github.com/rubysolo/skope",
       "repository": "https://github.com/rubysolo/skope",
+      "license": "MIT",
       "category": "security",
-      "keywords": ["security", "vulnerabilities", "dependencies", "sbom", "osv", "ci"]
+      "keywords": [
+        "security",
+        "vulnerabilities",
+        "dependencies",
+        "sbom",
+        "osv",
+        "ci"
+      ]
     }
   ]
 }
