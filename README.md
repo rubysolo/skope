@@ -4,9 +4,20 @@ A small, self-hosted dependency vulnerability watcher.
 
 Register your projects, give each one a token, and have CI report its dependencies on every push to the default branch. Skope syncs advisories from [OSV.dev](https://osv.dev) for Hex, crates.io, RubyGems, npm, Go and PyPI, matches them against every project, and alerts you by email and [ntfy](https://ntfy.sh) when something you ship is affected — including when a new advisory lands for a dependency you added months ago.
 
-**Status:** early development. The server, CLI, matching and alerts work; the CI action, agent skill and release packaging are in progress. See [`docs/DESIGN.md`](docs/DESIGN.md).
+**Status:** early development, not yet battle-tested. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Run the server
+
+With Docker Compose ([`deploy/compose.yml`](deploy/compose.yml)), behind a reverse proxy that terminates TLS:
+
+```sh
+cp deploy/skope.env.example deploy/skope.env   # set SKOPE_ADMIN_TOKEN (openssl rand -hex 32), alerts, backups
+docker compose -f deploy/compose.yml up -d
+```
+
+The image (`ghcr.io/rubysolo/skope:v0`) bundles [Litestream](https://litestream.io): set `LITESTREAM_REPLICA_URL` and the database streams continuously to S3-compatible storage, and an empty volume is restored from it on start.
+
+Or run the binary directly (`go install github.com/rubysolo/skope@latest`, or a [release](https://github.com/rubysolo/skope/releases)):
 
 ```sh
 export SKOPE_ADMIN_TOKEN=$(openssl rand -hex 32)   # keep it; the CLI needs it too

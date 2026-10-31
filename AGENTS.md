@@ -22,6 +22,7 @@ Read `GLOSSARY.md` before naming anything — use its terms (Advisory, not CVE; 
 - `internal/client/` — admin API client used by the CLI.
 - `cmd/` — Cobra commands: `serve`, `project`, `token`, `finding`, `sync`, `version`.
 - `report/` — the composite GitHub Action CI uses to report (`action.yml` + `report.sh`); `.github/workflows/action.yml` tests it end to end.
+- `deploy/` — container entrypoint, Litestream config, Compose example and env template; `Dockerfile` is built by GoReleaser.
 - `skills/skope-ci/SKILL.md` — the agent skill that connects a repo to skope; `.claude-plugin/` packages it as a Claude Code plugin.
 
 ## Build, test, run
@@ -42,3 +43,7 @@ Keep code `gofmt`-clean. Tests sit next to the code (`*_test.go`); store-backed 
 - Schema changes are new entries in `migrations` (`internal/store/store.go`); never edit a shipped migration.
 - Project tokens are stored only as SHA-256 hashes; never log or return them except at creation/rotation.
 - An advisory Skope can't evaluate is logged and skipped, never allowed to fail a sync or a report.
+
+## Releasing
+
+Push a `vX.Y.Z` tag. `.github/workflows/release.yml` runs GoReleaser (binaries, GitHub release, multi-arch `ghcr.io/rubysolo/skope` image tagged `X.Y.Z`, `vX` and `latest`) and then moves the floating `vX` git tag that CI uses the report action by. `goreleaser release --snapshot --clean` builds everything locally without publishing.

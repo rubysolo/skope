@@ -1,0 +1,8 @@
+# Used by the container entrypoint when LITESTREAM_REPLICA_URL is set.
+# Credentials come from LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY.
+# For S3-compatible storage, put the endpoint in the URL, e.g. Linode:
+#   s3://my-bucket/skope.db?endpoint=us-east-1.linodeobjects.com&region=us-east-1
+dbs:
+  - path: ${SKOPE_DB}
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
