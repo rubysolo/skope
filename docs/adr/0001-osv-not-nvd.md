@@ -5,5 +5,5 @@ We sync advisories from OSV.dev's per-ecosystem bulk exports rather than the NVD
 ## Consequences
 
 - The core concept is an **Advisory**, not a CVE. Many OSV advisories have only a GHSA, RUSTSEC or MAL identifier; a CVE ID is just one alias.
-- Software that is not distributed through a supported package registry (OS packages, vendored C libraries) is out of scope.
+- Software that is not distributed through a supported package registry (OS packages, vendored C libraries) is out of scope. Superseded for Alpine and Debian packages in container images by ADR-0004.
 - Each ecosystem needs its own version-ordering rules to evaluate OSV `ECOSYSTEM` ranges.

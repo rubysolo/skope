@@ -43,14 +43,14 @@ func TestAffectsSemverRange(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != want {
+		if got.Affected != want {
 			t.Errorf("hex_core@%s: got %v, want %v", v, got, want)
 		}
 	}
-	if got, _ := a.Affects(pkg("Hex", "phoenix", "0.5.0")); got {
+	if got, _ := a.Affects(pkg("Hex", "phoenix", "0.5.0")); got.Affected {
 		t.Error("a different package must not be affected")
 	}
-	if got, _ := a.Affects(pkg("npm", "hex_core", "0.5.0")); got {
+	if got, _ := a.Affects(pkg("npm", "hex_core", "0.5.0")); got.Affected {
 		t.Error("the same name in another ecosystem must not be affected")
 	}
 }
@@ -66,7 +66,7 @@ func TestAffectsEcosystemRangesUnordered(t *testing.T) {
 		"3.0.0": true, "3.0.9": true, "3.0.9.1": false, "3.1.0": false,
 	}
 	for v, want := range cases {
-		if got, err := a.Affects(pkg("RubyGems", "rack", v)); err != nil || got != want {
+		if got, err := a.Affects(pkg("RubyGems", "rack", v)); err != nil || got.Affected != want {
 			t.Errorf("rack@%s: got %v (%v), want %v", v, got, err, want)
 		}
 	}
@@ -75,10 +75,10 @@ func TestAffectsEcosystemRangesUnordered(t *testing.T) {
 func TestAffectsExplicitVersions(t *testing.T) {
 	a := mustParse(t, `{"id": "MAL-2025-1", "affected": [{"package": {"name": "Evil_Pkg", "ecosystem": "PyPI"},
 	  "versions": ["1.0.1"]}]}`)
-	if got, _ := a.Affects(pkg("PyPI", "evil-pkg", "1.0.1")); !got {
+	if got, _ := a.Affects(pkg("PyPI", "evil-pkg", "1.0.1")); !got.Affected {
 		t.Error("listed version, normalised name: want affected")
 	}
-	if got, _ := a.Affects(pkg("PyPI", "evil-pkg", "1.0.2")); got {
+	if got, _ := a.Affects(pkg("PyPI", "evil-pkg", "1.0.2")); got.Affected {
 		t.Error("unlisted version: want unaffected")
 	}
 }
@@ -88,7 +88,7 @@ func TestAffectsPEP440(t *testing.T) {
 	  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "4.2"}, {"fixed": "4.2.11"}]}]}]}`)
 	cases := map[string]bool{"4.2rc1": false, "4.2.0": true, "4.2.10": true, "4.2.11": false}
 	for v, want := range cases {
-		if got, err := a.Affects(pkg("PyPI", "django", v)); err != nil || got != want {
+		if got, err := a.Affects(pkg("PyPI", "django", v)); err != nil || got.Affected != want {
 			t.Errorf("django@%s: got %v (%v), want %v", v, got, err, want)
 		}
 	}
@@ -96,7 +96,7 @@ func TestAffectsPEP440(t *testing.T) {
 
 func TestAffectsWithdrawn(t *testing.T) {
 	a := mustParse(t, `{"id": "X", "withdrawn": "2026-01-01T00:00:00Z", "affected": [{"package": {"name": "rack", "ecosystem": "RubyGems"}, "versions": ["1.0.0"]}]}`)
-	if got, _ := a.Affects(pkg("RubyGems", "rack", "1.0.0")); got {
+	if got, _ := a.Affects(pkg("RubyGems", "rack", "1.0.0")); got.Affected {
 		t.Error("withdrawn advisories affect nothing")
 	}
 }
@@ -135,5 +135,91 @@ func TestMalicious(t *testing.T) {
 	}
 	if mustParse(t, hexCore).Malicious() {
 		t.Error("EEF advisory is not malicious")
+	}
+}
+
+// curlAlpine is shaped like the real ALPINE-CVE-2026-86411: one entry per release.
+const curlAlpine = `{"id": "ALPINE-CVE-2026-1", "modified": "m", "aliases": ["CVE-2026-1"],
+  "affected": [
+    {"package": {"name": "curl", "ecosystem": "Alpine:v3.23"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "8.23.0-r0"}]}]},
+    {"package": {"name": "curl", "ecosystem": "Alpine:v3.24"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "8.23.0-r1"}]}]}
+  ]}`
+
+func TestAffectsIsPerDistroRelease(t *testing.T) {
+	a := mustParse(t, curlAlpine)
+	cases := []struct {
+		eco, version string
+		want         bool
+	}{
+		{"Alpine:v3.24", "8.22.1-r0", true},
+		{"Alpine:v3.24", "8.23.0-r0", true}, // v3.24's fix is r1
+		{"Alpine:v3.24", "8.23.0-r1", false},
+		{"Alpine:v3.23", "8.23.0-r0", false},
+		{"Alpine:v3.20", "8.0.0-r0", false}, // release not listed: not affected
+	}
+	for _, c := range cases {
+		got, err := a.Affects(pkg(c.eco, "curl", c.version))
+		if err != nil || got.Affected != c.want {
+			t.Errorf("curl@%s on %s: got %+v (%v), want affected=%v", c.version, c.eco, got, err, c.want)
+		}
+	}
+	refs := a.Packages()
+	if len(refs) != 2 || refs[0] != (PackageRef{Ecosystem: "Alpine:v3.23", Key: "curl"}) {
+		t.Errorf("Packages() should index each release: %+v", refs)
+	}
+}
+
+func TestAffectsDebianUnfixedAndEpochs(t *testing.T) {
+	a := mustParse(t, `{"id": "DEBIAN-CVE-2026-2", "modified": "m", "affected": [
+	  {"package": {"name": "util-linux", "ecosystem": "Debian:12"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+	   "ecosystem_specific": {"urgency": "unimportant"}},
+	  {"package": {"name": "util-linux", "ecosystem": "Debian:13"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1:2.41-5"}]}],
+	   "ecosystem_specific": {"urgency": "high"}}]}`)
+
+	m, err := a.Affects(pkg("Debian:12", "util-linux", "2.38.1-5+deb12u3"))
+	if err != nil || !m.Affected || m.Fixable {
+		t.Errorf("Debian 12, no fix published: %+v %v", m, err)
+	}
+	m, _ = a.Affects(pkg("Debian:13", "util-linux", "2.41-4"))
+	if !m.Affected || !m.Fixable {
+		t.Errorf("Debian 13 below the epoch-1 fix: %+v", m)
+	}
+	m, _ = a.Affects(pkg("Debian:13", "util-linux", "1:2.41-5"))
+	if m.Affected {
+		t.Errorf("Debian 13 at the fix: %+v", m)
+	}
+	if got := a.Severity(); got != High {
+		t.Errorf("severity falls back to the highest urgency: got %v", got)
+	}
+}
+
+func TestFixable(t *testing.T) {
+	fixed := mustParse(t, hexCore)
+	if m, _ := fixed.Affects(pkg("Hex", "hex_core", "0.10.0")); !m.Fixable {
+		t.Errorf("a fixed event above the version: %+v", m)
+	}
+	open := mustParse(t, `{"id": "GHSA-x", "affected": [{"package": {"name": "left-pad", "ecosystem": "npm"},
+	  "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"last_affected": "1.3.0"}]}]}]}`)
+	if m, _ := open.Affects(pkg("npm", "left-pad", "1.2.0")); !m.Affected || m.Fixable {
+		t.Errorf("last_affected names no fix: %+v", m)
+	}
+	listed := mustParse(t, `{"id": "MAL-2026-1", "affected": [{"package": {"name": "evil", "ecosystem": "npm"}, "versions": ["1.0.0"]}]}`)
+	if m, _ := listed.Affects(pkg("npm", "evil", "1.0.0")); !m.Affected || m.Fixable {
+		t.Errorf("a versions list names no fix: %+v", m)
+	}
+}
+
+func TestCompactDropsDistroVersionLists(t *testing.T) {
+	a := mustParse(t, `{"id": "DEBIAN-CVE-1", "affected": [
+	  {"package": {"name": "openssl", "ecosystem": "Debian:12"}, "versions": ["3.0.1-1", "3.0.2-1"],
+	   "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.0.3-1"}]}]},
+	  {"package": {"name": "plug", "ecosystem": "Hex"}, "versions": ["1.0.0"],
+	   "ranges": [{"type": "SEMVER", "events": [{"introduced": "1.0.0"}, {"fixed": "1.0.1"}]}]}]}`)
+	c := a.Compact()
+	if c.Affected[0].Versions != nil || len(c.Affected[1].Versions) != 1 || len(a.Affected[0].Versions) != 2 {
+		t.Errorf("drop only the distro list, without touching the original: %+v / %+v", c.Affected, a.Affected)
+	}
+	if m, _ := c.Affects(pkg("Debian:12", "openssl", "3.0.2-1")); !m.Affected {
+		t.Error("the range still decides")
 	}
 }

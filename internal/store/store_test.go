@@ -63,7 +63,7 @@ func TestReportReplacesInventory(t *testing.T) {
 			return err
 		}
 		inv, _ := tx.Inventory(p.ID)
-		if len(inv) != 1 || inv[0] != second[0] {
+		if len(inv) != 1 || inv[0].Package != second[0] || inv[0].Source != "repo" {
 			t.Errorf("inventory = %+v, want only %+v", inv, second)
 		}
 		if latest, _ := tx.LatestReportID(p.ID); latest != id {
@@ -93,6 +93,27 @@ func TestReopenKeepsData(t *testing.T) {
 	st.Tx(context.Background(), func(tx *Tx) error {
 		if _, err := tx.ProjectName(1); err != nil {
 			t.Errorf("project lost on reopen: %v", err)
+		}
+		return nil
+	})
+}
+
+func TestReportsReplaceOnlyTheirSource(t *testing.T) {
+	st := open(t)
+	st.Tx(context.Background(), func(tx *Tx) error {
+		p, _, _ := tx.CreateProject("cure")
+		plug := []pkgid.Package{{Ecosystem: "Hex", Name: "plug", Version: "1.0.0"}}
+		ssl := []pkgid.Package{{Ecosystem: "Alpine:v3.24", Name: "openssl", Version: "3.5.0-r0"}}
+		tx.RecordReport(p.ID, ReportMeta{}, plug)
+		tx.RecordReport(p.ID, ReportMeta{Source: "image:ghcr.io/x/cure"}, ssl)
+		tx.RecordReport(p.ID, ReportMeta{Source: "image:ghcr.io/x/cure"}, ssl) // again: replaces, no duplicates
+		inv, err := tx.Inventory(p.ID)
+		if err != nil || len(inv) != 2 || inv[0].Source != "image:ghcr.io/x/cure" || inv[1].Source != "repo" {
+			t.Errorf("both sources kept: %+v %v", inv, err)
+		}
+		tx.RecordReport(p.ID, ReportMeta{}, nil) // the repo now has no packages
+		if inv, _ := tx.Inventory(p.ID); len(inv) != 1 || inv[0].Package != ssl[0] {
+			t.Errorf("a repo report must not touch the image's packages: %+v", inv)
 		}
 		return nil
 	})

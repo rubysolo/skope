@@ -25,10 +25,12 @@ const (
 	Reactivated
 	// IgnoreExpired is an ignored finding whose --until date has passed.
 	IgnoreExpired
+	// FixAvailable is an unfixed finding whose advisories now name a fix.
+	FixAvailable
 )
 
 func (k Kind) String() string {
-	return [...]string{"opened", "resolved", "reactivated", "ignore expired"}[k]
+	return [...]string{"opened", "resolved", "reactivated", "ignore expired", "fix available"}[k]
 }
 
 // Active reports whether the change puts a finding in front of the operator
@@ -48,8 +50,14 @@ type Change struct {
 	Ecosystem  string
 	Name       string
 	Versions   string
-	Severity   osv.Severity
-	// Quiet marks the resolution of an ignored finding: recorded, not announced.
+	// Sources are where the affected versions were found ("repo", "image:…").
+	Sources  []string
+	Severity osv.Severity
+	// Fixable is false for an unfixed finding: no advisory names a fix.
+	Fixable bool
+	// Quiet marks a change that is recorded but not announced: the resolution
+	// of an ignored finding, or anything about an unfixed one, which the
+	// operator hears about once a fix exists.
 	Quiet bool
 	// Report is the CI context of the report that opened the finding, when a
 	// report (rather than a sync) did.
@@ -77,7 +85,7 @@ func (c Change) Identifiers() []string {
 	ids := []string{c.VulnID}
 	for _, a := range c.Advisories {
 		ids = append(ids, a.ID)
-		ids = append(ids, a.Aliases...)
+		ids = append(ids, a.OtherIDs()...)
 	}
 	slices.Sort(ids)
 	return slices.Compact(ids)
@@ -100,22 +108,30 @@ type match struct {
 	group    store.VulnGroup
 	name     string
 	versions []string
+	sources  []string
 	advs     []*osv.Advisory
+	fixable  bool
 }
 
 type matches map[key]*match
 
-func (m matches) add(projectID int64, g store.VulnGroup, adv *osv.Advisory, p pkgid.Package) {
-	k := key{projectID, g.Key, p.Ecosystem, p.Key()}
+func (m matches) add(e store.InventoryEntry, g store.VulnGroup, adv *osv.Advisory, how osv.Match) {
+	p := e.Package
+	k := key{e.ProjectID, g.Key, p.Ecosystem, p.Key()}
 	if m[k] == nil {
 		m[k] = &match{group: g, name: p.Name}
 	}
-	if !slices.Contains(m[k].versions, p.Version) {
-		m[k].versions = append(m[k].versions, p.Version)
+	mm := m[k]
+	if !slices.Contains(mm.versions, p.Version) {
+		mm.versions = append(mm.versions, p.Version)
 	}
-	if !slices.Contains(m[k].advs, adv) {
-		m[k].advs = append(m[k].advs, adv)
+	if !slices.Contains(mm.sources, e.Source) {
+		mm.sources = append(mm.sources, e.Source)
 	}
+	if !slices.Contains(mm.advs, adv) {
+		mm.advs = append(mm.advs, adv)
+	}
+	mm.fixable = mm.fixable || how.Fixable
 }
 
 // finding describes the match as the finding it should be.
@@ -127,22 +143,32 @@ func (m *match) finding(k key) store.Finding {
 		ids = append(ids, a.ID)
 		severity = max(severity, a.Severity())
 	}
+	slices.Sort(m.sources)
 	c := Change{Advisories: m.advs}
 	return store.Finding{ProjectID: k.projectID, VulnID: k.vulnID, AdvisoryIDs: strings.Join(ids, ","), Summary: c.Summary(),
-		Ecosystem: k.ecosystem, NameKey: k.nameKey, Name: m.name, Versions: strings.Join(m.versions, ", "), Severity: severity.String()}
+		Ecosystem: k.ecosystem, NameKey: k.nameKey, Name: m.name, Versions: strings.Join(m.versions, ", "),
+		Sources: strings.Join(m.sources, ","), Severity: severity.String(), Fixable: m.fixable}
 }
 
 // affects wraps Advisory.Affects; an advisory Skope can't evaluate is logged
 // and treated as not matching rather than failing the whole scan.
-func affects(adv *osv.Advisory, p pkgid.Package) bool {
-	hit, err := adv.Affects(p)
+func affects(adv *osv.Advisory, p pkgid.Package) osv.Match {
+	m, err := adv.Affects(p)
 	if err != nil {
 		slog.Warn("cannot evaluate advisory", "err", err)
 	}
-	return hit
+	return m
 }
 
-// Report replaces a project's inventory and matches it against every known
+// announced reports whether the operator hears about a finding: once it can
+// be fixed, or straight away for a malicious package, which has no fix but
+// removing it.
+func announced(fixable bool, advs []*osv.Advisory) bool {
+	return fixable || slices.ContainsFunc(advs, (*osv.Advisory).Malicious)
+}
+
+// Report replaces the report's source's part of a project's inventory, then
+// matches the project's whole inventory, every source, against every known
 // advisory.
 func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.ReportMeta, pkgs []pkgid.Package) ([]Change, error) {
 	var changes []Change
@@ -151,11 +177,15 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 		if err != nil {
 			return err
 		}
+		inventory, err := tx.Inventory(projectID)
+		if err != nil {
+			return err
+		}
 		advs := advisoryCache{tx: tx}
 		groups := map[string]store.VulnGroup{}
 		found := matches{}
-		for _, p := range pkgs {
-			ids, err := tx.AdvisoryIDsFor(p.Ecosystem, p.Key())
+		for _, e := range inventory {
+			ids, err := tx.AdvisoryIDsFor(e.Package.Ecosystem, e.Package.Key())
 			if err != nil {
 				return err
 			}
@@ -164,7 +194,8 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 				if err != nil {
 					return err
 				}
-				if !affects(adv, p) {
+				how := affects(adv, e.Package)
+				if !how.Affected {
 					continue
 				}
 				g, ok := groups[id]
@@ -174,7 +205,7 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 					}
 					groups[id] = g
 				}
-				found.add(projectID, g, adv, p)
+				found.add(e, g, adv, how)
 			}
 		}
 		open, err := tx.OpenFindingsForProject(projectID)
@@ -241,8 +272,8 @@ func matchVuln(tx *store.Tx, g store.VulnGroup) ([]Change, error) {
 				return nil, err
 			}
 			for _, e := range entries {
-				if affects(adv, e.Package) {
-					found.add(e.ProjectID, g, adv, e.Package)
+				if how := affects(adv, e.Package); how.Affected {
+					found.add(e, g, adv, how)
 				}
 			}
 		}
@@ -272,7 +303,8 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 			names[f.ProjectID] = name
 		}
 		return Change{Kind: kind, FindingID: f.ID, ProjectID: f.ProjectID, Project: name, VulnID: f.VulnID, Advisories: matched,
-			Ecosystem: f.Ecosystem, Name: f.Name, Versions: f.Versions, Severity: osv.ParseSeverity(f.Severity)}, nil
+			Ecosystem: f.Ecosystem, Name: f.Name, Versions: f.Versions, Sources: strings.Split(f.Sources, ","),
+			Severity: osv.ParseSeverity(f.Severity), Fixable: f.Fixable, Quiet: !announced(f.Fixable, matched)}, nil
 	}
 
 	open, err := rekey(tx, open)
@@ -292,7 +324,7 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 			if err != nil {
 				return nil, err
 			}
-			c.Quiet = f.Ignored(tx.Now())
+			c.Quiet = c.Quiet || f.Ignored(tx.Now())
 			changes = append(changes, c)
 			continue
 		}
@@ -300,10 +332,18 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 
 		want := m.finding(k)
 		want.ID = f.ID
-		if want.AdvisoryIDs != f.AdvisoryIDs || want.Summary != f.Summary || want.Versions != f.Versions || want.Severity != f.Severity {
+		if want.AdvisoryIDs != f.AdvisoryIDs || want.Summary != f.Summary || want.Versions != f.Versions ||
+			want.Sources != f.Sources || want.Severity != f.Severity || want.Fixable != f.Fixable {
 			if err := tx.UpdateFinding(want); err != nil {
 				return nil, err
 			}
+		}
+		if !announced(f.Fixable, m.advs) && announced(want.Fixable, m.advs) && !f.Ignored(tx.Now()) {
+			c, err := change(FixAvailable, want, m.advs)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, c)
 		}
 		if f.IgnoredReason == "" {
 			continue
@@ -365,9 +405,11 @@ func (s *Scanner) ExpireIgnores(ctx context.Context) ([]Change, error) {
 			if err != nil {
 				return err
 			}
+			matched := advs.load(f.AdvisoryIDs)
 			changes = append(changes, Change{Kind: IgnoreExpired, FindingID: f.ID, ProjectID: f.ProjectID, Project: name,
-				VulnID: f.VulnID, Advisories: advs.load(f.AdvisoryIDs), Ecosystem: f.Ecosystem, Name: f.Name,
-				Versions: f.Versions, Severity: osv.ParseSeverity(f.Severity)})
+				VulnID: f.VulnID, Advisories: matched, Ecosystem: f.Ecosystem, Name: f.Name, Versions: f.Versions,
+				Sources: strings.Split(f.Sources, ","), Severity: osv.ParseSeverity(f.Severity), Fixable: f.Fixable,
+				Quiet: !announced(f.Fixable, matched)})
 		}
 		return nil
 	})

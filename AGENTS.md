@@ -10,7 +10,7 @@ Read `GLOSSARY.md` before naming anything — use its terms (Advisory, not CVE; 
 
 ## Repository layout
 
-- `internal/pkgid/` — purl → OSV package identity, per-ecosystem name normalisation.
+- `internal/pkgid/` — purl → OSV package identity, per-ecosystem name normalisation; distro packages (apk/deb) map to `Alpine:vX.Y` / `Debian:N` by source package.
 - `internal/osv/` — OSV advisory model, range evaluation, severity.
 - `internal/report/` — decodes a report body (CycloneDX or purl list).
 - `internal/store/` — SQLite schema (`schema.sql`) and queries; all writes go through `Store.Tx`.
@@ -31,7 +31,7 @@ Read `GLOSSARY.md` before naming anything — use its terms (Advisory, not CVE; 
 go build ./...
 go test ./...
 go vet ./...
-SKOPE_LIVE=Hex,crates.io go test ./internal/scan -run TestLiveOSV -v   # against real osv.dev
+SKOPE_LIVE=Hex,Alpine go test ./internal/scan -run TestLiveOSV -v   # against real osv.dev (or SKOPE_LIVE=all)
 ```
 
 Keep code `gofmt`-clean. Tests sit next to the code (`*_test.go`); store-backed tests use a real SQLite file in `t.TempDir()`, not mocks.

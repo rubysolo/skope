@@ -22,7 +22,7 @@ func TestLiveOSV(t *testing.T) {
 	}
 	ecosystems := strings.Split(live, ",")
 	if live == "all" {
-		ecosystems = pkgid.Ecosystems()
+		ecosystems = pkgid.SyncEcosystems()
 	}
 	path := os.Getenv("SKOPE_LIVE_DB")
 	if path == "" {
@@ -46,6 +46,8 @@ func TestLiveOSV(t *testing.T) {
 		"npm":       "pkg:npm/lodash@4.17.15",
 		"Go":        "pkg:golang/golang.org/x/net@v0.0.1",
 		"PyPI":      "pkg:pypi/django@3.0.0",
+		"Alpine":    "pkg:apk/alpine/libcurl@8.5.0-r0?distro=alpine-3.19.1&upstream=curl",
+		"Debian":    "pkg:deb/debian/libssl3@3.0.11-1~deb12u1?distro=debian-12.4&upstream=openssl",
 	}
 	var pkgs []pkgid.Package
 	for _, eco := range ecosystems {
@@ -82,10 +84,10 @@ func TestLiveOSV(t *testing.T) {
 				}
 				for _, ref := range a.Packages() {
 					for _, af := range a.Affected {
-						if pkgid.NameKey(eco, af.Package.Name) != ref.Key {
+						if pkgid.NameKey(ref.Ecosystem, af.Package.Name) != ref.Key {
 							continue
 						}
-						if _, err := a.Affects(pkgid.Package{Ecosystem: eco, Name: af.Package.Name, Version: "1.0.0"}); err != nil {
+						if _, err := a.Affects(pkgid.Package{Ecosystem: ref.Ecosystem, Name: af.Package.Name, Version: "1.0.0"}); err != nil {
 							if bad < 5 {
 								t.Logf("  %v", err)
 							}
@@ -105,7 +107,7 @@ func TestLiveOSV(t *testing.T) {
 		open, _ := tx.OpenFindingsForProject(p.ID)
 		hit := map[string]bool{}
 		for _, f := range open {
-			hit[f.Ecosystem] = true
+			hit[pkgid.SyncBase(f.Ecosystem)] = true
 		}
 		for _, eco := range ecosystems {
 			if !hit[eco] {

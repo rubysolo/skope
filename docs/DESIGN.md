@@ -11,7 +11,9 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 
 ## Advisories
 
-- Source: OSV bulk exports, one zip per ecosystem — Hex, crates.io, RubyGems, npm, Go, PyPI.
+- Source: OSV bulk exports, one zip per ecosystem — Hex, crates.io, RubyGems, npm, Go, PyPI, Alpine, Debian (ADR-0004).
+- Distro ecosystems carry their release (`Alpine:v3.24`, `Debian:12`); distro advisories match by source package name and source version (syft's `upstream=`). Distro entries are stored without their enumerated `versions` lists, which their ranges already decide (verified over 7.3M versions).
+- An advisory's `upstream` ids (distro advisories put their CVE there) count as aliases when grouping vulnerabilities.
 - Sync runs hourly. The first sync for an ecosystem downloads `all.zip`; later syncs read `modified_id.csv` and fetch only advisories modified since the last sync.
 - `ECOSYSTEM` and `SEMVER` ranges are evaluated with per-ecosystem version ordering; `GIT` ranges are ignored. Explicit `versions` lists are honoured.
 - Malicious Package Advisories (`MAL-*`) are included and always critical.
@@ -21,7 +23,7 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 
 - `POST /v1/reports` with `Authorization: Bearer <project token>`.
 - Body: a CycloneDX JSON SBOM, or `{"packages": ["pkg:hex/phoenix@1.7.14", …]}`. Optional metadata: commit SHA, ref, CI run URL.
-- A report replaces the project's inventory entirely. Only default-branch builds report.
+- A report has a source (`Skope-Source` header): `repo` (default) or `image:<name>`, tag and digest dropped. It replaces only that source's part of the inventory; matching always covers every source. Only default-branch builds report.
 - The response lists the project's open findings.
 - Report log (time, commit, ref, run URL, package count) is kept 90 days.
 
@@ -32,13 +34,14 @@ Agreed 2026-10-30. Vocabulary is defined in `GLOSSARY.md`; the hard-to-reverse c
 - Matching runs after every sync (changed advisories × all inventories) and after every report (that inventory × all advisories).
 - Resolved when no affected version remains or every advisory is withdrawn; recurrence is a new finding.
 - Ignored with a reason and optional expiry; reactivated when any of its advisories changes.
+- Unfixed (no matching advisory names a fixed version) findings are tracked but quiet: no alert on open, reactivation or resolution, until a fix appears ("fix available"). Malicious packages alert regardless. Unfixed findings don't count toward the action's `findings` output or `fail-on`.
 - Each finding records the report that introduced it.
 
 ## Alerts
 
 - One batched alert per sync run or report, grouped by vulnerability.
 - Email (SMTP): every new and resolved finding.
-- ntfy (publish to a topic, token auth): new findings that are high/critical, unknown severity, or malicious. Malicious → priority 5, otherwise 4.
+- ntfy (publish to a topic, token auth): new findings that are high/critical, unknown severity, or malicious. OS-package findings push only when high/critical (Debian's urgency is the fallback severity). Malicious → priority 5, otherwise 4.
 - Stale project: alert after 30 days without a report (configurable per project), then weekly.
 
 ## Operator commands
@@ -54,10 +57,6 @@ Project tokens are `skope_`-prefixed random strings, stored as SHA-256 hashes; o
 - Composite action `rubysolo/skope/report@v0` (a floating major tag that moves with each release, matching the binary's major version): runs syft on the checkout, skipping build output and installed-dependency directories, posts the report, prints findings, optional `fail-on`. Refuses to report from non-default branches unless `any-branch: true`.
 - Triggered on push to the default branch, weekly `schedule:`, and `workflow_dispatch`.
 - Agent skill `skills/skope-ci/SKILL.md`: `skope project add` → `gh secret set SKOPE_TOKEN` → add the workflow. The token is never echoed.
-
-## Later
-
-- Container images: an optional `image:` input on the action runs syft on the built image; Skope adds Alpine/Debian/Ubuntu, mapping the purl's `distro=` qualifier to OSV's ecosystem (e.g. `Alpine:v3.20`). Needs a noise policy for unfixed distro advisories. Will revise ADR-0001's scope.
 
 ## Release and hosting
 

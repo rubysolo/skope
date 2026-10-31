@@ -282,3 +282,127 @@ func TestExpireIgnores(t *testing.T) {
 		t.Errorf("change should carry the advisory and the finding be unmuted: %+v", cs[0])
 	}
 }
+
+// reportFrom records a report of full purls from a source and matches it.
+func (e *env) reportFrom(projectID int64, source string, purls ...string) []Change {
+	e.t.Helper()
+	var list []pkgid.Package
+	for _, s := range purls {
+		p, err := pkgid.Parse(s)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		list = append(list, p)
+	}
+	changes, err := e.sc.Report(context.Background(), projectID, store.ReportMeta{Source: source}, list)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return changes
+}
+
+// raw stores an advisory document as-is and matches it.
+func (e *env) raw(doc string) []Change {
+	e.t.Helper()
+	a, err := osv.Parse([]byte(doc))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var changed []string
+	e.tx(func(tx *store.Tx) error {
+		ok, err := tx.UpsertAdvisory(a)
+		if ok {
+			changed = append(changed, a.ID)
+		}
+		return err
+	})
+	changes, err := e.sc.Advisories(context.Background(), changed)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return changes
+}
+
+func loud(cs []Change) (out []Change) {
+	for _, c := range cs {
+		if !c.Quiet {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+const opensslUnfixed = `{"id": "DEBIAN-CVE-2026-9", "modified": "2026-01-01T00:00:00Z", "aliases": ["CVE-2026-9"], "summary": "openssl bug",
+  "affected": [{"package": {"name": "openssl", "ecosystem": "Debian:12"},
+    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}], "ecosystem_specific": {"urgency": "high"}}]}`
+
+const opensslFixed = `{"id": "DEBIAN-CVE-2026-9", "modified": "2026-02-01T00:00:00Z", "aliases": ["CVE-2026-9"], "summary": "openssl bug",
+  "affected": [{"package": {"name": "openssl", "ecosystem": "Debian:12"},
+    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.0.18-1~deb12u1"}]}], "ecosystem_specific": {"urgency": "high"}}]}`
+
+const libssl = "pkg:deb/debian/libssl3@3.0.17-1~deb12u2?arch=arm64&distro=debian-12.12&upstream=openssl"
+
+func TestUnfixedFindingWaitsForAFix(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.raw(opensslUnfixed)
+
+	changes := e.reportFrom(p, "image:ghcr.io/x/cure", libssl)
+	expect(t, "opened, but unfixed", changes, "opened cure openssl@3.0.17-1~deb12u2;")
+	if !changes[0].Quiet || changes[0].Fixable || changes[0].Severity != osv.High {
+		t.Errorf("an unfixed finding opens quietly: %+v", changes[0])
+	}
+	if f := e.open(p)[0]; f.Fixable || f.Sources != "image:ghcr.io/x/cure" || f.Ecosystem != "Debian:12" {
+		t.Errorf("finding = %+v", f)
+	}
+
+	changes = e.raw(opensslFixed)
+	expect(t, "the advisory gains a fix", changes, "fix available cure openssl@3.0.17-1~deb12u2;")
+	if changes[0].Quiet || !changes[0].Fixable {
+		t.Errorf("fix available is announced: %+v", changes[0])
+	}
+	expect(t, "the image is rebuilt with the fix",
+		loud(e.reportFrom(p, "image:ghcr.io/x/cure", "pkg:deb/debian/libssl3@3.0.18-1~deb12u1?distro=debian-12.13&upstream=openssl")),
+		"resolved cure openssl@3.0.17-1~deb12u2;")
+}
+
+func TestUnfixedFindingResolvesQuietly(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.raw(opensslUnfixed)
+	e.reportFrom(p, "image:ghcr.io/x/cure", libssl)
+	changes := e.reportFrom(p, "image:ghcr.io/x/cure") // openssl gone from the image
+	if len(changes) != 1 || changes[0].Kind != Resolved || !changes[0].Quiet {
+		t.Errorf("never announced, so its resolution isn't either: %+v", changes)
+	}
+}
+
+func TestMaliciousAlertsWithoutAFix(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.raw(`{"id": "MAL-2026-7", "modified": "m", "affected": [{"package": {"name": "evil", "ecosystem": "npm"}, "versions": ["1.0.0"]}]}`)
+	changes := e.reportFrom(p, "", "pkg:npm/evil@1.0.0")
+	if len(changes) != 1 || changes[0].Quiet || changes[0].Fixable {
+		t.Errorf("malicious packages are announced though nothing fixes them: %+v", changes)
+	}
+}
+
+func TestSourcesDontReplaceEachOther(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.advisory("GHSA-1", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	e.raw(opensslFixed)
+
+	expect(t, "repo report", e.reportFrom(p, "", "pkg:hex/plug@1.2.0"), "opened cure plug@1.2.0;")
+	expect(t, "image report keeps the repo's finding", e.reportFrom(p, "image:ghcr.io/x/cure", libssl),
+		"opened cure openssl@3.0.17-1~deb12u2;")
+	expect(t, "repo report keeps the image's finding", e.reportFrom(p, "", "pkg:hex/plug@1.3.0"), "")
+
+	// The same package in both sources is one finding naming both.
+	e.reportFrom(p, "image:ghcr.io/x/cure", libssl, "pkg:hex/plug@1.2.0")
+	for _, f := range e.open(p) {
+		if f.Name == "plug" && (f.Sources != "image:ghcr.io/x/cure,repo" || f.Versions != "1.2.0, 1.3.0" && f.Versions != "1.3.0, 1.2.0") {
+			t.Errorf("plug finding = %+v", f)
+		}
+	}
+}

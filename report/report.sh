@@ -4,7 +4,9 @@
 # Environment:
 #   SKOPE_URL, SKOPE_TOKEN     server and project token (required)
 #   SKOPE_PATH                 directory to scan (default .)
-#   SKOPE_EXCLUDE              comma-separated syft exclude globs
+#   SKOPE_IMAGE                container image to scan instead (e.g. ghcr.io/me/app:sha);
+#                              reported as the source image:<name>, tag and digest dropped
+#   SKOPE_EXCLUDE              comma-separated syft exclude globs (directory scans only)
 #   SKOPE_FAIL_ON              fail when an open, unignored finding is at least
 #                              this severe: low|medium|high|critical ("" = never)
 #   SKOPE_COMMIT, SKOPE_REF, SKOPE_RUN_URL   CI context sent with the report
@@ -39,14 +41,30 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 excludes=()
-IFS=',' read -ra patterns <<<"${SKOPE_EXCLUDE:-}"
-for p in "${patterns[@]}"; do
-	p=$(echo "$p" | xargs)
-	[ -n "$p" ] && excludes+=(--exclude "$p")
-done
+source=repo
+target="dir:$path"
+if [ -n "${SKOPE_IMAGE:-}" ]; then
+	# One source per image name, so each build's report replaces the last.
+	name=${SKOPE_IMAGE%%@*}
+	last=${name##*/}
+	[[ $last == *:* ]] && name=${name%:*}
+	source="image:$(echo "$name" | tr '[:upper:]' '[:lower:]')"
+	target=$SKOPE_IMAGE
+else
+	IFS=',' read -ra patterns <<<"${SKOPE_EXCLUDE:-}"
+	for p in "${patterns[@]}"; do
+		p=$(echo "$p" | xargs)
+		[ -n "$p" ] && excludes+=(--exclude "$p")
+	done
+fi
 
-echo "Scanning $path with $("$syft" version -o json 2>/dev/null | jq -r '"syft " + .version' || echo syft)"
-"$syft" scan "dir:$path" "${excludes[@]}" -o "cyclonedx-json=$work/sbom.json" -q
+echo "Scanning $target ($source) with $("$syft" version -o json 2>/dev/null | jq -r '"syft " + .version' || echo syft)"
+# syft's -q would also swallow its errors; keep its output for when it fails.
+if ! "$syft" scan "$target" ${excludes[@]+"${excludes[@]}"} -o "cyclonedx-json=$work/sbom.json" 2>"$work/syft.log"; then
+	echo "::error::syft could not scan $target"
+	grep -v '^\s*$' "$work/syft.log" | tail -20
+	exit 1
+fi
 
 status=$(curl -sS --retry 3 --retry-all-errors -o "$work/result.json" -w '%{http_code}' \
 	-X POST "${SKOPE_URL%/}/v1/reports" \
@@ -55,6 +73,7 @@ status=$(curl -sS --retry 3 --retry-all-errors -o "$work/result.json" -w '%{http
 	-H "Skope-Commit: ${SKOPE_COMMIT:-}" \
 	-H "Skope-Ref: ${SKOPE_REF:-}" \
 	-H "Skope-Run-Url: ${SKOPE_RUN_URL:-}" \
+	-H "Skope-Source: $source" \
 	--data-binary "@$work/sbom.json")
 if [ "$status" != 200 ]; then
 	msg=$(jq -r '.error // empty' "$work/result.json" 2>/dev/null || true)
@@ -63,17 +82,17 @@ if [ "$status" != 200 ]; then
 fi
 
 result="$work/result.json"
-open=$(jq '[.findings[] | select(.ignored == null)] | length' "$result")
+open=$(jq '[.findings[] | select(.ignored == null and .fixable)] | length' "$result")
 jq -r '"skope: \(.project): \(.packages) packages reported (\(.skipped) skipped), \(.findings | length) open findings"' "$result"
-jq -r '.findings[] | "  \(.severity | ascii_upcase)  \(.vulnerability)  \(.ecosystem) \(.package) \(.versions)\(if .ignored then "  (ignored: \(.ignored.reason))" else "" end)\n      \(.summary // "")  \(.url)"' "$result"
+jq -r '.findings[] | "  \(.severity | ascii_upcase)  \(.vulnerability)  \(.ecosystem) \(.package) \(.versions)  [\(.sources | join(", "))]\(if .ignored then "  (ignored: \(.ignored.reason))" elif .fixable then "" else "  (no fix yet)" end)\n      \(.summary // "")  \(.url)"' "$result"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 	{
 		jq -r '"### skope: \(.project)\n\n\(.packages) packages reported, \(.findings | length) open findings.\n"' "$result"
 		if [ "$(jq '.findings | length' "$result")" -gt 0 ]; then
-			echo "| Severity | Vulnerability | Package | Versions | |"
-			echo "|---|---|---|---|---|"
-			jq -r '.findings[] | "| \(.severity) | [\(.vulnerability)](\(.url)) | \(.ecosystem) \(.package) | \(.versions) | \(if .ignored then "ignored" else "" end) |"' "$result"
+			echo "| Severity | Vulnerability | Package | Versions | Source | |"
+			echo "|---|---|---|---|---|---|"
+			jq -r '.findings[] | "| \(.severity) | [\(.vulnerability)](\(.url)) | \(.ecosystem) \(.package) | \(.versions) | \(.sources | join(", ")) | \(if .ignored then "ignored" elif .fixable then "" else "no fix yet" end) |"' "$result"
 		fi
 	} >>"$GITHUB_STEP_SUMMARY"
 fi
@@ -86,7 +105,7 @@ if [ "$threshold" -gt 0 ]; then
 	failing=0
 	while read -r sev; do
 		[ "$(rank "$sev")" -ge "$threshold" ] && failing=$((failing + 1))
-	done < <(jq -r '.findings[] | select(.ignored == null) | .severity' "$result")
+	done < <(jq -r '.findings[] | select(.ignored == null and .fixable) | .severity' "$result")
 	if [ "$failing" -gt 0 ]; then
 		echo "::error::$failing open finding(s) at or above $SKOPE_FAIL_ON"
 		exit 1

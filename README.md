@@ -58,7 +58,22 @@ jobs:
           token: ${{ secrets.SKOPE_TOKEN }}
 ```
 
-The action runs [syft](https://github.com/anchore/syft) over the checkout's lockfiles, reports to skope, and prints the project's open findings. Its inputs (`path`, `fail-on`, `exclude`, `any-branch`) are documented in [`report/action.yml`](report/action.yml).
+The action runs [syft](https://github.com/anchore/syft) over the checkout's lockfiles, reports to skope, and prints the project's open findings. Its inputs (`path`, `image`, `fail-on`, `exclude`, `any-branch`) are documented in [`report/action.yml`](report/action.yml).
+
+### Container images
+
+To watch the OS packages in an image you build (Alpine and Debian), add a step after the build in that workflow:
+
+```yaml
+      - uses: rubysolo/skope/report@v0
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          url: ${{ vars.SKOPE_URL }}
+          token: ${{ secrets.SKOPE_TOKEN }}
+          image: ghcr.io/me/my-app:${{ github.sha }}
+```
+
+An image is its own source for the project, so it doesn't replace the lockfile report. Distro advisories with no fix yet are tracked but stay quiet until a fixed package is published; then you get a "fix available" alert.
 
 ### Let a coding agent do it
 

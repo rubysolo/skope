@@ -31,11 +31,27 @@ var ecosystems = map[string]string{
 	"npm":    "npm",
 	"golang": "Go",
 	"pypi":   "PyPI",
+	"apk":    "Alpine",
+	"deb":    "Debian",
 }
 
-// Ecosystems lists the supported OSV ecosystem names.
-func Ecosystems() []string {
-	return []string{"Hex", "crates.io", "RubyGems", "npm", "Go", "PyPI"}
+// SyncEcosystems lists the ecosystems whose advisories Skope syncs, as OSV
+// names its exports. A distribution's export covers all its releases.
+func SyncEcosystems() []string {
+	return []string{"Hex", "crates.io", "RubyGems", "npm", "Go", "PyPI", "Alpine", "Debian"}
+}
+
+// IsOS reports whether an ecosystem is an operating system release
+// ("Alpine:v3.24", "Debian:12") rather than a language registry.
+func IsOS(ecosystem string) bool {
+	return strings.HasPrefix(ecosystem, "Alpine:") || strings.HasPrefix(ecosystem, "Debian:")
+}
+
+// SyncBase is the export an ecosystem's advisories come from: the
+// distribution for an OS release, the ecosystem itself otherwise.
+func SyncBase(ecosystem string) string {
+	base, _, _ := strings.Cut(ecosystem, ":")
+	return base
 }
 
 // ErrUnsupported reports a purl whose type Skope does not watch.
@@ -57,6 +73,9 @@ func Parse(s string) (Package, error) {
 	if u.Version == "" {
 		return Package{}, fmt.Errorf("purl %q has no version", s)
 	}
+	if eco == "Alpine" || eco == "Debian" {
+		return osPackage(u, eco)
+	}
 	p := Package{Ecosystem: eco, Name: u.Name, Version: u.Version}
 	switch eco {
 	case "npm":
@@ -70,6 +89,49 @@ func Parse(s string) (Package, error) {
 		p.Version = goVersion(p.Name, p.Version)
 	}
 	return p, nil
+}
+
+// osPackage identifies a distribution package the way its advisories do: by
+// release (from the distro qualifier) and by source package, whose name and
+// version syft records in the upstream qualifier when they differ from the
+// binary package's.
+func osPackage(u packageurl.PackageURL, eco string) (Package, error) {
+	q := u.Qualifiers.Map()
+	release, ok := osRelease(eco, u.Namespace, q["distro"])
+	if !ok {
+		return Package{}, ErrUnsupported{Type: u.Type + "/" + u.Namespace}
+	}
+	p := Package{Ecosystem: release, Name: u.Name, Version: u.Version}
+	if up := q["upstream"]; up != "" {
+		name, version, hasVersion := strings.Cut(up, "@")
+		p.Name = name
+		if hasVersion {
+			p.Version = version
+		}
+	}
+	return p, nil
+}
+
+// osRelease maps syft's distro qualifier ("alpine-3.20.10", "debian-12.15")
+// to OSV's ecosystem ("Alpine:v3.20", "Debian:12").
+func osRelease(eco, namespace, distro string) (string, bool) {
+	switch {
+	case eco == "Alpine" && namespace == "alpine":
+		v, ok := strings.CutPrefix(distro, "alpine-")
+		parts := strings.Split(v, ".")
+		if !ok || len(parts) < 2 {
+			return "", false
+		}
+		return "Alpine:v" + parts[0] + "." + parts[1], true
+	case eco == "Debian" && namespace == "debian":
+		v, ok := strings.CutPrefix(distro, "debian-")
+		major, _, _ := strings.Cut(v, ".")
+		if !ok || major == "" {
+			return "", false
+		}
+		return "Debian:" + major, true
+	}
+	return "", false
 }
 
 // goVersion strips the prefixes Go tooling puts on versions ("v1.2.3",

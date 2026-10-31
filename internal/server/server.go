@@ -50,7 +50,7 @@ type Server struct {
 
 func New(st *store.Store, syncer *osvsync.Syncer, adminToken string, notifier Notifier) *Server {
 	return &Server{st: st, scanner: scan.New(st), syncer: syncer, adminToken: adminToken,
-		notifier: notifier, ecosystems: pkgid.Ecosystems()}
+		notifier: notifier, ecosystems: pkgid.SyncEcosystems()}
 }
 
 // SetEcosystems limits syncing to the named ecosystems (OSV spelling, e.g.
@@ -58,8 +58,8 @@ func New(st *store.Store, syncer *osvsync.Syncer, adminToken string, notifier No
 // match nothing.
 func (s *Server) SetEcosystems(names []string) error {
 	for _, n := range names {
-		if !slices.Contains(pkgid.Ecosystems(), n) {
-			return fmt.Errorf("unknown ecosystem %q (supported: %s)", n, strings.Join(pkgid.Ecosystems(), ", "))
+		if !slices.Contains(pkgid.SyncEcosystems(), n) {
+			return fmt.Errorf("unknown ecosystem %q (supported: %s)", n, strings.Join(pkgid.SyncEcosystems(), ", "))
 		}
 	}
 	s.ecosystems = names
@@ -204,8 +204,8 @@ func toAPIFinding(v store.FindingView) api.Finding {
 	advisories := strings.Split(v.AdvisoryIDs, ",")
 	f := api.Finding{ID: v.ID, Project: v.Project, Vulnerability: v.VulnID, Advisories: advisories, Summary: v.Summary,
 		URL:       api.AdvisoryURL(advisories[0]),
-		Ecosystem: v.Ecosystem, Package: v.Name, Versions: v.Versions, Severity: v.Severity,
-		OpenedAt: v.OpenedAt, ResolvedAt: v.ResolvedAt}
+		Ecosystem: v.Ecosystem, Package: v.Name, Versions: v.Versions, Sources: strings.Split(v.Sources, ","),
+		Fixable: v.Fixable, Severity: v.Severity, OpenedAt: v.OpenedAt, ResolvedAt: v.ResolvedAt}
 	if v.IgnoredReason != "" {
 		f.Ignored = &api.Ignored{Reason: v.IgnoredReason, Until: v.IgnoredUntil}
 	}
@@ -236,7 +236,12 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := store.ReportMeta{Commit: r.Header.Get(api.HeaderCommit), Ref: r.Header.Get(api.HeaderRef), RunURL: r.Header.Get(api.HeaderRunURL)}
+	source, ok := validSource(r.Header.Get(api.HeaderSource))
+	if !ok {
+		writeError(w, http.StatusBadRequest, api.HeaderSource+` must be "repo" or "image:<name>"`)
+		return
+	}
+	meta := store.ReportMeta{Source: source, Commit: r.Header.Get(api.HeaderCommit), Ref: r.Header.Get(api.HeaderRef), RunURL: r.Header.Get(api.HeaderRunURL)}
 	changes, err := s.scanner.Report(r.Context(), project.ID, meta, rep.Packages)
 	if err != nil {
 		storeError(w, err, "project")
@@ -280,6 +285,24 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// validSource accepts "repo" (or nothing) and "image:<name>", where name is
+// an image reference without tag or digest.
+func validSource(s string) (string, bool) {
+	if s == "" || s == store.SourceRepo {
+		return store.SourceRepo, true
+	}
+	name, ok := strings.CutPrefix(s, "image:")
+	if !ok || name == "" || len(name) > 255 {
+		return "", false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || strings.ContainsRune("-_./:", c)) {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 func validName(name string) bool {
