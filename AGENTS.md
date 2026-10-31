@@ -16,7 +16,8 @@ Read `GLOSSARY.md` before naming anything — use its terms (Advisory, not CVE; 
 - `internal/store/` — SQLite schema (`schema.sql`) and queries; all writes go through `Store.Tx`.
 - `internal/osvsync/` — downloads OSV exports (full archive first, then incremental).
 - `internal/scan/` — matching and the finding lifecycle (opened, resolved, reactivated), one finding per vulnerability (alias group).
-- `internal/server/` — HTTP API (report endpoint, admin API) and the sync loop.
+- `internal/server/` — HTTP API (report endpoint, admin API), the sync loop and housekeeping (ignore expiry, stale projects).
+- `internal/alert/` — composes and delivers alerts: SMTP email for everything, ntfy push for urgent findings.
 - `internal/api/` — JSON shapes shared by server, CLI client and CI.
 - `internal/client/` — admin API client used by the CLI.
 - `cmd/` — Cobra commands: `serve`, `project`, `token`, `finding`, `sync`, `version`.

@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rubysolo/skope/internal/api"
 	"github.com/rubysolo/skope/internal/osvsync"
@@ -31,6 +33,7 @@ const plugAdvisory = `{"id": "GHSA-plug", "modified": "2026-01-01T00:00:00Z", "s
 type recorder struct {
 	mu      sync.Mutex
 	batches [][]scan.Change
+	stale   [][]store.StaleProject
 }
 
 func (r *recorder) Notify(_ context.Context, cs []scan.Change) {
@@ -39,8 +42,32 @@ func (r *recorder) Notify(_ context.Context, cs []scan.Change) {
 	r.batches = append(r.batches, cs)
 }
 
+func (r *recorder) Stale(_ context.Context, ps []store.StaleProject) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stale = append(r.stale, ps)
+}
+
+// notified waits for report notifications, which are sent asynchronously.
+func (r *recorder) notified(t *testing.T, n int) [][]scan.Change {
+	t.Helper()
+	for range 100 {
+		r.mu.Lock()
+		got := len(r.batches)
+		r.mu.Unlock()
+		if got >= n {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.batches)
+}
+
 type harness struct {
 	t      *testing.T
+	st     *store.Store
 	srv    *Server
 	http   *httptest.Server
 	notify *recorder
@@ -74,7 +101,7 @@ func newHarness(t *testing.T) *harness {
 	syncer.BaseURL = osvSrv.URL
 	syncer.TempDir = t.TempDir()
 
-	h := &harness{t: t, notify: &recorder{}}
+	h := &harness{t: t, st: st, notify: &recorder{}}
 	h.srv = New(st, syncer, adminToken, h.notify)
 	h.srv.ecosystems = []string{"Hex"}
 	h.srv.SyncAll(context.Background())
@@ -135,16 +162,16 @@ func TestReportFlow(t *testing.T) {
 		res.Findings[0].URL != "https://osv.dev/vulnerability/GHSA-plug" {
 		t.Fatalf("findings = %+v", res.Findings)
 	}
-	if len(h.notify.batches) != 1 || h.notify.batches[0][0].Kind != scan.Opened {
-		t.Errorf("notifications = %+v", h.notify.batches)
+	if b := h.notify.notified(t, 1); len(b) != 1 || b[0][0].Kind != scan.Opened {
+		t.Errorf("notifications = %+v", b)
 	}
 
 	_, res = h.report(token, `"pkg:hex/plug@1.5.0"`)
 	if len(res.Findings) != 0 {
 		t.Errorf("fixed version: findings = %+v", res.Findings)
 	}
-	if len(h.notify.batches) != 2 || h.notify.batches[1][0].Kind != scan.Resolved {
-		t.Errorf("want a resolved notification, got %+v", h.notify.batches)
+	if b := h.notify.notified(t, 2); len(b) != 2 || b[1][0].Kind != scan.Resolved {
+		t.Errorf("want a resolved notification, got %+v", b)
 	}
 }
 
@@ -248,5 +275,32 @@ func TestHealthz(t *testing.T) {
 	h := newHarness(t)
 	if resp, _ := h.do("GET", "/healthz", "", ""); resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz: %d", resp.StatusCode)
+	}
+}
+
+func TestHousekeeping(t *testing.T) {
+	h := newHarness(t)
+	token := h.createProject("cure")
+	h.createProject("silent")
+	_, res := h.report(token, `"pkg:hex/plug@1.2.0"`)
+	until := time.Now().Add(48 * time.Hour).UTC().Format(time.DateOnly)
+	if resp, body := h.do("PUT", fmt.Sprintf("/v1/findings/%d/ignore", res.Findings[0].ID), adminToken,
+		fmt.Sprintf(`{"reason": "later", "until": %q}`, until)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ignore: %d %s", resp.StatusCode, body)
+	}
+
+	h.srv.Housekeeping(context.Background())
+	if len(h.notify.stale) != 0 || len(h.notify.notified(t, 1)) != 1 {
+		t.Fatalf("nothing due yet: stale %v, batches %d", h.notify.stale, len(h.notify.batches))
+	}
+
+	h.st.Now = func() time.Time { return time.Now().Add(31 * 24 * time.Hour).UTC() }
+	h.srv.Housekeeping(context.Background())
+	b := h.notify.notified(t, 2)
+	if len(b) != 2 || b[1][0].Kind != scan.IgnoreExpired {
+		t.Errorf("want an ignore-expired notification, got %+v", b)
+	}
+	if len(h.notify.stale) != 1 || len(h.notify.stale[0]) != 2 {
+		t.Errorf("both projects are 31 days quiet: %+v", h.notify.stale)
 	}
 }
