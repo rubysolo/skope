@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +31,8 @@ Configuration comes from the environment:
   SKOPE_DB             database path (default skope.db)
   SKOPE_LISTEN         listen address (default 127.0.0.1:8080)
   SKOPE_SYNC_INTERVAL  time between syncs (default 1h)
+  SKOPE_ECOSYSTEMS     comma-separated ecosystems to sync (default all:
+                       Hex,crates.io,RubyGems,npm,Go,PyPI)
 
 Alerts (each channel is optional):
   SKOPE_SMTP_ADDR      SMTP submission server, host:port (465 = implicit TLS)
@@ -63,6 +67,11 @@ Alerts (each channel is optional):
 		}
 
 		srv := server.New(st, osvsync.New(st), adminToken, alerts)
+		if eco := os.Getenv("SKOPE_ECOSYSTEMS"); eco != "" {
+			if err := srv.SetEcosystems(strings.Split(eco, ",")); err != nil {
+				return fmt.Errorf("SKOPE_ECOSYSTEMS: %w", err)
+			}
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 

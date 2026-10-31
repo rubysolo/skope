@@ -1,0 +1,73 @@
+name: skope report
+description: Report this repository's dependencies to a skope server and show its open findings.
+author: rubysolo
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  url:
+    description: The skope server's URL.
+    required: true
+  token:
+    description: The project token (store it as a secret, e.g. secrets.SKOPE_TOKEN).
+    required: true
+  path:
+    description: Directory to scan, for monorepos with one skope project per app.
+    default: .
+  fail-on:
+    description: Fail the step when an open, unignored finding is at least this severe (low, medium, high, critical). Empty never fails.
+    default: ""
+  exclude:
+    description: Comma-separated syft exclude globs. The default skips build output and installed-dependency directories, whose binaries aren't what the lockfiles describe.
+    default: "**/_build/**,**/deps/**,**/target/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/.git/**"
+  any-branch:
+    description: Report from any branch. Off by default; a report replaces the project's inventory, so only the default branch should send one.
+    default: "false"
+  syft-version:
+    description: syft version to use.
+    default: v1.55.0
+
+outputs:
+  findings:
+    description: Number of open, unignored findings.
+    value: ${{ steps.report.outputs.findings }}
+  packages:
+    description: Number of packages reported.
+    value: ${{ steps.report.outputs.packages }}
+
+runs:
+  using: composite
+  steps:
+    - id: guard
+      shell: bash
+      env:
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        ANY_BRANCH: ${{ inputs.any-branch }}
+      run: |
+        # Scheduled runs carry no repository payload but always run on the default branch.
+        if [ "$ANY_BRANCH" != "true" ] && [ -n "$DEFAULT_BRANCH" ] && [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+          echo "::notice::skope reports only from the default branch ($DEFAULT_BRANCH); skipping $GITHUB_REF"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - id: syft
+      if: steps.guard.outputs.skip != 'true'
+      uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      with:
+        syft-version: ${{ inputs.syft-version }}
+
+    - id: report
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        SKOPE_URL: ${{ inputs.url }}
+        SKOPE_TOKEN: ${{ inputs.token }}
+        SKOPE_PATH: ${{ inputs.path }}
+        SKOPE_EXCLUDE: ${{ inputs.exclude }}
+        SKOPE_FAIL_ON: ${{ inputs.fail-on }}
+        SKOPE_COMMIT: ${{ github.sha }}
+        SKOPE_REF: ${{ github.ref }}
+        SKOPE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        SYFT: ${{ steps.syft.outputs.cmd }}
+      run: '"$GITHUB_ACTION_PATH/report.sh"'

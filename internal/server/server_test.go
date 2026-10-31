@@ -304,3 +304,13 @@ func TestHousekeeping(t *testing.T) {
 		t.Errorf("both projects are 31 days quiet: %+v", h.notify.stale)
 	}
 }
+
+func TestSetEcosystems(t *testing.T) {
+	h := newHarness(t)
+	if err := h.srv.SetEcosystems([]string{"Hex", "crates.io"}); err != nil {
+		t.Error(err)
+	}
+	if err := h.srv.SetEcosystems([]string{"hex"}); err == nil || !strings.Contains(err.Error(), "supported: Hex") {
+		t.Errorf("misspelled ecosystem: %v", err)
+	}
+}

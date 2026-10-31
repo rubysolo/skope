@@ -6,9 +6,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +51,19 @@ type Server struct {
 func New(st *store.Store, syncer *osvsync.Syncer, adminToken string, notifier Notifier) *Server {
 	return &Server{st: st, scanner: scan.New(st), syncer: syncer, adminToken: adminToken,
 		notifier: notifier, ecosystems: pkgid.Ecosystems()}
+}
+
+// SetEcosystems limits syncing to the named ecosystems (OSV spelling, e.g.
+// "Hex", "crates.io"). Reports in other ecosystems are still accepted but
+// match nothing.
+func (s *Server) SetEcosystems(names []string) error {
+	for _, n := range names {
+		if !slices.Contains(pkgid.Ecosystems(), n) {
+			return fmt.Errorf("unknown ecosystem %q (supported: %s)", n, strings.Join(pkgid.Ecosystems(), ", "))
+		}
+	}
+	s.ecosystems = names
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {

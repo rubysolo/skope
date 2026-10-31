@@ -1,0 +1,4 @@
+%{
+  "phoenix": {:hex, :phoenix, "1.7.14", "a7d0b3f1bc95987044ddada111e77bd7f75646a08518942c72a8440278ae7825", [:mix], [], "hexpm", "c7859bc56cc5dfef19ecfc240775dae358cbaa530231118a9e014df392ace61a"},
+  "plug": {:hex, :plug, "1.15.0", "f40df58e1277fc7189f260daf788d628f03ae3053ce7ac1ca63eaf0423238714", [:mix], [], "hexpm", "29e23c1fbbc4b9e1c6ff13bcb1a7e8c7b85f67d70d6eae5a0bbd8e1f8fa8bdf3"},
+}
