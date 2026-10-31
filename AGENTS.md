@@ -21,6 +21,8 @@ Read `GLOSSARY.md` before naming anything — use its terms (Advisory, not CVE; 
 - `internal/api/` — JSON shapes shared by server, CLI client and CI.
 - `internal/client/` — admin API client used by the CLI.
 - `cmd/` — Cobra commands: `serve`, `project`, `token`, `finding`, `sync`, `version`.
+- `report/` — the composite GitHub Action CI uses to report (`action.yml` + `report.sh`); `.github/workflows/action.yml` tests it end to end.
+- `skills/skope-ci/SKILL.md` — the agent skill that connects a repo to skope; `.claude-plugin/` packages it as a Claude Code plugin.
 
 ## Build, test, run
 

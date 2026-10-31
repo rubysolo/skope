@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "skope",
+  "owner": {
+    "name": "Solomon White"
+  },
+  "description": "skope: a small self-hosted dependency vulnerability watcher.",
+  "plugins": [
+    {
+      "name": "skope",
+      "source": "./",
+      "description": "Connect repositories to a skope server: registers the project, stores its token as a GitHub secret, and adds the CI workflow that reports dependencies.",
+      "homepage": "https://github.com/rubysolo/skope",
+      "repository": "https://github.com/rubysolo/skope",
+      "license": "MIT",
+      "category": "security",
+      "keywords": [
+        "security",
+        "vulnerabilities",
+        "dependencies",
+        "sbom",
+        "osv",
+        "ci"
+      ]
+    }
+  ]
+}

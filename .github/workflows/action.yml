@@ -1,0 +1,82 @@
+name: Action
+
+# Runs the report action against a skope server started in the job, using a
+# fixture whose lockfile pins known-vulnerable Hex packages.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start skope (Hex only)
+        id: server
+        run: |
+          go build -o "$RUNNER_TEMP/skope" .
+          admin=$(openssl rand -hex 32)
+          echo "::add-mask::$admin"
+          SKOPE_ADMIN_TOKEN=$admin SKOPE_DB="$RUNNER_TEMP/skope.db" SKOPE_ECOSYSTEMS=Hex \
+            "$RUNNER_TEMP/skope" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for _ in $(seq 1 60); do grep -q "synced ecosystem=Hex" "$RUNNER_TEMP/serve.log" && break; sleep 1; done
+          cat "$RUNNER_TEMP/serve.log"
+          grep -q "synced ecosystem=Hex" "$RUNNER_TEMP/serve.log"
+          token=$(SKOPE_URL=http://127.0.0.1:8080 SKOPE_ADMIN_TOKEN=$admin "$RUNNER_TEMP/skope" project add fixture)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        id: report
+        uses: ./report
+        with:
+          url: http://127.0.0.1:8080
+          token: ${{ steps.server.outputs.token }}
+          path: report/testdata/elixir-app
+          any-branch: "true"
+
+      - name: Expect findings, and the build artifact excluded
+        env:
+          FINDINGS: ${{ steps.report.outputs.findings }}
+          PACKAGES: ${{ steps.report.outputs.packages }}
+        run: |
+          echo "findings=$FINDINGS packages=$PACKAGES"
+          test "$FINDINGS" -ge 5
+          test "$PACKAGES" -eq 2
+
+      - name: Report with fail-on
+        id: strict
+        continue-on-error: true
+        uses: ./report
+        with:
+          url: http://127.0.0.1:8080
+          token: ${{ steps.server.outputs.token }}
+          path: report/testdata/elixir-app
+          any-branch: "true"
+          fail-on: high
+
+      - name: Expect fail-on to fail
+        run: test "${{ steps.strict.outcome }}" = failure
+
+      - name: Report from a branch without any-branch
+        id: guarded
+        uses: ./report
+        with:
+          url: http://127.0.0.1:8080
+          token: ${{ steps.server.outputs.token }}
+          path: report/testdata/elixir-app
+
+      - name: Expect pull requests to be skipped
+        if: github.event_name == 'pull_request'
+        run: test -z "${{ steps.guarded.outputs.findings }}"
