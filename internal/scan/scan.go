@@ -23,9 +23,17 @@ const (
 	Resolved
 	// Reactivated is an ignored finding whose vulnerability has since changed.
 	Reactivated
+	// IgnoreExpired is an ignored finding whose --until date has passed.
+	IgnoreExpired
 )
 
-func (k Kind) String() string { return [...]string{"opened", "resolved", "reactivated"}[k] }
+func (k Kind) String() string {
+	return [...]string{"opened", "resolved", "reactivated", "ignore expired"}[k]
+}
+
+// Active reports whether the change puts a finding in front of the operator
+// (as opposed to taking one away).
+func (k Kind) Active() bool { return k != Resolved }
 
 // Change is one finding transition, carrying what an alert needs to describe it.
 type Change struct {
@@ -43,6 +51,9 @@ type Change struct {
 	Severity   osv.Severity
 	// Quiet marks the resolution of an ignored finding: recorded, not announced.
 	Quiet bool
+	// Report is the CI context of the report that opened the finding, when a
+	// report (rather than a sync) did.
+	Report store.ReportMeta
 }
 
 // Summary is the first summary any of the advisories gives.
@@ -171,6 +182,11 @@ func (s *Scanner) Report(ctx context.Context, projectID int64, meta store.Report
 			return err
 		}
 		changes, err = reconcile(tx, &advs, open, found, func(int64) (int64, error) { return reportID, nil })
+		for i := range changes {
+			if changes[i].Kind == Opened {
+				changes[i].Report = meta
+			}
+		}
 		return err
 	})
 	return changes, err
@@ -272,13 +288,7 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 			if err := tx.ResolveFinding(f.ID); err != nil {
 				return nil, err
 			}
-			var last []*osv.Advisory
-			for _, id := range strings.Split(f.AdvisoryIDs, ",") {
-				if a, err := advs.get(id); err == nil {
-					last = append(last, a)
-				}
-			}
-			c, err := change(Resolved, f, last)
+			c, err := change(Resolved, f, advs.load(f.AdvisoryIDs))
 			if err != nil {
 				return nil, err
 			}
@@ -336,6 +346,32 @@ func reconcile(tx *store.Tx, advs *advisoryCache, open []store.Finding, found ma
 			cmp.Compare(a.Name, b.Name), cmp.Compare(a.Kind, b.Kind))
 	})
 	return changes, nil
+}
+
+// ExpireIgnores unmutes findings whose ignore has run out.
+func (s *Scanner) ExpireIgnores(ctx context.Context) ([]Change, error) {
+	var changes []Change
+	err := s.st.Tx(ctx, func(tx *store.Tx) error {
+		expired, err := tx.ExpiredIgnores()
+		if err != nil {
+			return err
+		}
+		advs := advisoryCache{tx: tx}
+		for _, f := range expired {
+			if err := tx.Unignore(f.ID); err != nil {
+				return err
+			}
+			name, err := tx.ProjectName(f.ProjectID)
+			if err != nil {
+				return err
+			}
+			changes = append(changes, Change{Kind: IgnoreExpired, FindingID: f.ID, ProjectID: f.ProjectID, Project: name,
+				VulnID: f.VulnID, Advisories: advs.load(f.AdvisoryIDs), Ecosystem: f.Ecosystem, Name: f.Name,
+				Versions: f.Versions, Severity: osv.ParseSeverity(f.Severity)})
+		}
+		return nil
+	})
+	return changes, err
 }
 
 // rekey moves open findings to their vulnerability's current key. A key
@@ -401,4 +437,16 @@ func (c *advisoryCache) get(id string) (*osv.Advisory, error) {
 	}
 	c.byID[id] = a
 	return a, nil
+}
+
+// load fetches a finding's comma-separated advisories, skipping any that are
+// no longer stored.
+func (c *advisoryCache) load(ids string) []*osv.Advisory {
+	var out []*osv.Advisory
+	for _, id := range strings.Split(ids, ",") {
+		if a, err := c.get(id); err == nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }

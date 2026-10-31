@@ -28,19 +28,12 @@ const maxReportBytes = 64 << 20
 // reportRetention is how long the report log is kept.
 const reportRetention = 90 * 24 * time.Hour
 
-// Notifier receives the finding changes from one sync run or one report.
+// Notifier alerts the operator.
 type Notifier interface {
+	// Notify receives the finding changes from one sync run or one report.
 	Notify(ctx context.Context, changes []scan.Change)
-}
-
-// LogNotifier logs changes; it stands in until alert channels are configured.
-type LogNotifier struct{}
-
-func (LogNotifier) Notify(_ context.Context, changes []scan.Change) {
-	for _, c := range changes {
-		slog.Info("finding "+c.Kind.String(), "project", c.Project, "vulnerability", c.VulnID,
-			"package", c.Name, "versions", c.Versions, "severity", c.Severity, "quiet", c.Quiet)
-	}
+	// Stale receives projects that have stopped reporting.
+	Stale(ctx context.Context, projects []store.StaleProject)
 }
 
 type Server struct {
@@ -78,12 +71,14 @@ func (s *Server) Handler() http.Handler {
 
 // --- background work --------------------------------------------------------
 
-// Run syncs immediately and then every interval until ctx is done.
+// Run syncs and does housekeeping immediately and then every interval until
+// ctx is done.
 func (s *Server) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		s.SyncAll(ctx)
+		s.Housekeeping(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -122,6 +117,25 @@ func (s *Server) SyncAll(ctx context.Context) {
 	}
 	if len(all) > 0 {
 		s.notifier.Notify(ctx, all)
+	}
+}
+
+// Housekeeping unmutes findings whose ignore has expired and alerts about
+// projects that have stopped reporting.
+func (s *Server) Housekeeping(ctx context.Context) {
+	changes, err := s.scanner.ExpireIgnores(ctx)
+	if err != nil {
+		slog.Error("expiring ignores failed", "err", err)
+	}
+	if len(changes) > 0 {
+		s.notifier.Notify(ctx, changes)
+	}
+	var stale []store.StaleProject
+	if err := s.st.Tx(ctx, func(tx *store.Tx) (err error) { stale, err = tx.StaleProjects(); return }); err != nil {
+		slog.Error("staleness check failed", "err", err)
+	}
+	if len(stale) > 0 {
+		s.notifier.Stale(ctx, stale)
 	}
 }
 
@@ -214,7 +228,8 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(changes) > 0 {
-		s.notifier.Notify(context.WithoutCancel(r.Context()), changes)
+		// Delivery retries for minutes when a channel is down; CI shouldn't wait.
+		go s.notifier.Notify(context.WithoutCancel(r.Context()), changes)
 	}
 
 	res := api.ReportResult{Project: project.Name, Packages: len(rep.Packages), Skipped: rep.Skipped, Findings: []api.Finding{}}

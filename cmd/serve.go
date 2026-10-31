@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rubysolo/skope/internal/alert"
 	"github.com/rubysolo/skope/internal/osvsync"
 	"github.com/rubysolo/skope/internal/server"
 	"github.com/rubysolo/skope/internal/store"
@@ -27,7 +28,15 @@ Configuration comes from the environment:
   SKOPE_ADMIN_TOKEN    required; authenticates the admin API
   SKOPE_DB             database path (default skope.db)
   SKOPE_LISTEN         listen address (default 127.0.0.1:8080)
-  SKOPE_SYNC_INTERVAL  time between syncs (default 1h)`,
+  SKOPE_SYNC_INTERVAL  time between syncs (default 1h)
+
+Alerts (each channel is optional):
+  SKOPE_SMTP_ADDR      SMTP submission server, host:port (465 = implicit TLS)
+  SKOPE_SMTP_USER, SKOPE_SMTP_PASSWORD
+  SKOPE_EMAIL_FROM, SKOPE_EMAIL_TO (comma-separated)
+  SKOPE_NTFY_TOPIC     ntfy topic for urgent findings
+  SKOPE_NTFY_URL       ntfy server (default https://ntfy.sh)
+  SKOPE_NTFY_TOKEN     ntfy access token`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		adminToken := os.Getenv("SKOPE_ADMIN_TOKEN")
@@ -45,7 +54,15 @@ Configuration comes from the environment:
 		}
 		defer st.Close()
 
-		srv := server.New(st, osvsync.New(st), adminToken, server.LogNotifier{})
+		alerts, err := alert.FromEnv()
+		if err != nil {
+			return err
+		}
+		if len(alerts.Channels()) == 0 {
+			slog.Warn("no alert channels configured; findings will only be logged (set SKOPE_SMTP_ADDR and/or SKOPE_NTFY_TOPIC)")
+		}
+
+		srv := server.New(st, osvsync.New(st), adminToken, alerts)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
@@ -59,7 +76,7 @@ Configuration comes from the environment:
 			httpSrv.Shutdown(shutdown)
 		}()
 
-		slog.Info("skope listening", "addr", httpSrv.Addr, "version", Version)
+		slog.Info("skope listening", "addr", httpSrv.Addr, "version", Version, "alerts", alerts.Channels())
 		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}

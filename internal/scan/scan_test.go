@@ -243,3 +243,42 @@ func TestMergingAliasGroupsDoesNotRealert(t *testing.T) {
 	}
 	expect(t, "next report", e.report(p, "plug@1.2.0"), "")
 }
+
+func TestReportContextOnOpenedFindings(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.advisory("GHSA-1", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	c := e.report(p, "plug@1.2.0")[0]
+	if c.Report.Commit != "abc" {
+		t.Errorf("opened by a report should carry its commit: %+v", c.Report)
+	}
+	e.report(p)
+	e.report(p, "plug@1.2.0")
+	changes := e.advisory("GHSA-2", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	if changes[0].Report.Commit != "" {
+		t.Errorf("opened by a sync: no report context, got %+v", changes[0].Report)
+	}
+}
+
+func TestExpireIgnores(t *testing.T) {
+	e := newEnv(t)
+	p := e.project("cure")
+	e.advisory("GHSA-1", "2026-01-01T00:00:00Z", "plug", "1.0.0", "1.5.0", "")
+	e.report(p, "plug@1.2.0")
+	f := e.open(p)[0]
+	until := e.clock.Add(time.Hour).Format(time.RFC3339)
+	e.tx(func(tx *store.Tx) error { return tx.IgnoreFinding(f.ID, "later", until, "2026-01-01T00:00:00Z") })
+
+	if cs, _ := e.sc.ExpireIgnores(context.Background()); len(cs) != 0 {
+		t.Errorf("not yet: %+v", cs)
+	}
+	e.clock = e.clock.Add(2 * time.Hour)
+	cs, err := e.sc.ExpireIgnores(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, "expired", cs, "ignore expired cure plug@1.2.0;")
+	if cs[0].Summary() != "bad" || e.open(p)[0].IgnoredReason != "" {
+		t.Errorf("change should carry the advisory and the finding be unmuted: %+v", cs[0])
+	}
+}
