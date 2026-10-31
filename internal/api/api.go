@@ -33,18 +33,21 @@ type ProjectToken struct {
 }
 
 type Finding struct {
-	ID         int64    `json:"id"`
-	Project    string   `json:"project"`
-	Advisory   string   `json:"advisory"`
-	Summary    string   `json:"summary,omitempty"`
-	URL        string   `json:"url"`
-	Ecosystem  string   `json:"ecosystem"`
-	Package    string   `json:"package"`
-	Versions   string   `json:"versions"`
-	Severity   string   `json:"severity"`
-	OpenedAt   string   `json:"opened_at"`
-	ResolvedAt string   `json:"resolved_at,omitempty"`
-	Ignored    *Ignored `json:"ignored,omitempty"`
+	ID      int64  `json:"id"`
+	Project string `json:"project"`
+	// Vulnerability is the key of the vulnerability (its smallest identifier,
+	// a CVE id when there is one); Advisories are the advisories that matched.
+	Vulnerability string   `json:"vulnerability"`
+	Advisories    []string `json:"advisories"`
+	Summary       string   `json:"summary,omitempty"`
+	URL           string   `json:"url"`
+	Ecosystem     string   `json:"ecosystem"`
+	Package       string   `json:"package"`
+	Versions      string   `json:"versions"`
+	Severity      string   `json:"severity"`
+	OpenedAt      string   `json:"opened_at"`
+	ResolvedAt    string   `json:"resolved_at,omitempty"`
+	Ignored       *Ignored `json:"ignored,omitempty"`
 }
 
 type Ignored struct {

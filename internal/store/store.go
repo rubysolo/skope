@@ -24,8 +24,11 @@ import (
 //go:embed schema.sql
 var schemaV1 string
 
+//go:embed schema_v2.sql
+var schemaV2 string
+
 // migrations[i] takes the database from user_version i to i+1.
-var migrations = []string{schemaV1}
+var migrations = []string{schemaV1, schemaV2}
 
 var (
 	ErrNotFound = errors.New("not found")
@@ -282,6 +285,14 @@ func (t *Tx) UpsertAdvisory(a *osv.Advisory) (bool, error) {
 	if _, err := t.tx.Exec(`DELETE FROM advisory_packages WHERE advisory_id = ?`, a.ID); err != nil {
 		return false, err
 	}
+	if _, err := t.tx.Exec(`DELETE FROM advisory_aliases WHERE advisory_id = ?`, a.ID); err != nil {
+		return false, err
+	}
+	for _, alias := range append([]string{a.ID}, a.Aliases...) {
+		if _, err := t.tx.Exec(`INSERT OR IGNORE INTO advisory_aliases (alias, advisory_id) VALUES (?, ?)`, alias, a.ID); err != nil {
+			return false, err
+		}
+	}
 	for _, ref := range a.Packages() {
 		if _, err := t.tx.Exec(`INSERT INTO advisory_packages (advisory_id, ecosystem, name_key) VALUES (?, ?, ?)`,
 			a.ID, ref.Ecosystem, ref.Key); err != nil {
@@ -348,9 +359,13 @@ func (t *Tx) SetSyncCursor(ecosystem, cursor string) error {
 // --- findings ---------------------------------------------------------------
 
 type Finding struct {
-	ID            int64
-	ProjectID     int64
-	AdvisoryID    string
+	ID        int64
+	ProjectID int64
+	// VulnID keys the vulnerability: the smallest identifier in its alias group.
+	VulnID string
+	// AdvisoryIDs lists the group's advisories that matched, comma-separated.
+	AdvisoryIDs   string
+	Summary       string
 	Ecosystem     string
 	NameKey       string
 	Name          string
@@ -360,7 +375,7 @@ type Finding struct {
 	ResolvedAt    string
 	IgnoredReason string
 	IgnoredUntil  string
-	// IgnoredModified is the advisory's modified time when it was ignored.
+	// IgnoredModified is the vulnerability's modified time when it was ignored.
 	IgnoredModified string
 }
 
@@ -369,7 +384,7 @@ func (f Finding) Ignored(now string) bool {
 	return f.IgnoredReason != "" && (f.IgnoredUntil == "" || f.IgnoredUntil > now)
 }
 
-const findingCols = `id, project_id, advisory_id, ecosystem, name_key, name, versions, severity, opened_at,
+const findingCols = `id, project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, severity, opened_at,
 	COALESCE(resolved_at, ''), COALESCE(ignored_reason, ''), COALESCE(ignored_until, ''), COALESCE(ignored_modified, '')`
 
 func (t *Tx) findings(where string, args ...any) ([]Finding, error) {
@@ -381,7 +396,7 @@ func (t *Tx) findings(where string, args ...any) ([]Finding, error) {
 	var out []Finding
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.ProjectID, &f.AdvisoryID, &f.Ecosystem, &f.NameKey, &f.Name, &f.Versions,
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.VulnID, &f.AdvisoryIDs, &f.Summary, &f.Ecosystem, &f.NameKey, &f.Name, &f.Versions,
 			&f.Severity, &f.OpenedAt, &f.ResolvedAt, &f.IgnoredReason, &f.IgnoredUntil, &f.IgnoredModified); err != nil {
 			return nil, err
 		}
@@ -394,8 +409,18 @@ func (t *Tx) OpenFindingsForProject(projectID int64) ([]Finding, error) {
 	return t.findings(`project_id = ? AND resolved_at IS NULL`, projectID)
 }
 
-func (t *Tx) OpenFindingsForAdvisory(advisoryID string) ([]Finding, error) {
-	return t.findings(`advisory_id = ? AND resolved_at IS NULL`, advisoryID)
+// OpenFindingsForVulns returns open findings keyed by any of ids. A
+// vulnerability's key can change when alias groups merge, so callers pass
+// every identifier in the group to catch findings under a former key.
+func (t *Tx) OpenFindingsForVulns(ids []string) ([]Finding, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return t.findings(`vuln_id IN (?`+strings.Repeat(", ?", len(ids)-1)+`) AND resolved_at IS NULL`, args...)
 }
 
 // InsertFinding opens a finding; reportID 0 means none is known.
@@ -404,18 +429,25 @@ func (t *Tx) InsertFinding(f Finding, reportID int64) (int64, error) {
 	if reportID != 0 {
 		rid = reportID
 	}
-	res, err := t.tx.Exec(`INSERT INTO findings (project_id, advisory_id, ecosystem, name_key, name, versions, severity, opened_at, introduced_report_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.ProjectID, f.AdvisoryID, f.Ecosystem, f.NameKey, f.Name, f.Versions, f.Severity, t.now, rid)
+	res, err := t.tx.Exec(`INSERT INTO findings (project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, severity, opened_at, introduced_report_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ProjectID, f.VulnID, f.AdvisoryIDs, f.Summary, f.Ecosystem, f.NameKey, f.Name, f.Versions, f.Severity, t.now, rid)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-// UpdateFinding refreshes an open finding's versions and severity.
-func (t *Tx) UpdateFinding(id int64, versions, severity string) error {
-	_, err := t.tx.Exec(`UPDATE findings SET versions = ?, severity = ? WHERE id = ?`, versions, severity, id)
+// UpdateFinding refreshes an open finding's descriptive fields.
+func (t *Tx) UpdateFinding(f Finding) error {
+	_, err := t.tx.Exec(`UPDATE findings SET advisory_ids = ?, summary = ?, versions = ?, severity = ? WHERE id = ?`,
+		f.AdvisoryIDs, f.Summary, f.Versions, f.Severity, f.ID)
+	return err
+}
+
+// RekeyFinding moves an open finding to its vulnerability's new key.
+func (t *Tx) RekeyFinding(id int64, vulnID string) error {
+	_, err := t.tx.Exec(`UPDATE findings SET vuln_id = ? WHERE id = ?`, vulnID, id)
 	return err
 }
 
@@ -425,10 +457,11 @@ func (t *Tx) ResolveFinding(id int64) error {
 }
 
 // IgnoreFinding mutes an open finding until `until` ("" for indefinitely),
-// remembering the advisory version it was judged against.
-func (t *Tx) IgnoreFinding(id int64, reason, until, advisoryModified string) error {
+// remembering the vulnerability's state (VulnGroup.Modified) it was judged
+// against.
+func (t *Tx) IgnoreFinding(id int64, reason, until, vulnModified string) error {
 	res, err := t.tx.Exec(`UPDATE findings SET ignored_reason = ?, ignored_until = NULLIF(?, ''), ignored_modified = ?
-		WHERE id = ? AND resolved_at IS NULL`, reason, until, advisoryModified, id)
+		WHERE id = ? AND resolved_at IS NULL`, reason, until, vulnModified, id)
 	if err != nil {
 		return err
 	}

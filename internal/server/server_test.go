@@ -131,7 +131,7 @@ func TestReportFlow(t *testing.T) {
 	if res.Project != "cure" || res.Packages != 2 || res.Skipped != 1 {
 		t.Errorf("result = %+v", res)
 	}
-	if len(res.Findings) != 1 || res.Findings[0].Advisory != "GHSA-plug" || res.Findings[0].Severity != "high" ||
+	if len(res.Findings) != 1 || res.Findings[0].Vulnerability != "GHSA-plug" || res.Findings[0].Severity != "high" ||
 		res.Findings[0].URL != "https://osv.dev/vulnerability/GHSA-plug" {
 		t.Fatalf("findings = %+v", res.Findings)
 	}

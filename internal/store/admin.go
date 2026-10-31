@@ -1,8 +1,8 @@
 package store
 
 import (
-	"database/sql"
-	"errors"
+	"cmp"
+	"slices"
 )
 
 // ProjectByName looks up a project, archived or not.
@@ -81,11 +81,10 @@ func (t *Tx) FindingByID(id int64) (Finding, error) {
 	return fs[0], nil
 }
 
-// FindingView is a finding with the names an operator reads it by.
+// FindingView is a finding with the project name an operator reads it by.
 type FindingView struct {
 	Finding
 	Project string
-	Summary string
 }
 
 // FindingFilter narrows FindingViews. Zero values mean "any".
@@ -96,53 +95,43 @@ type FindingFilter struct {
 
 // FindingViews lists findings, most severe first.
 func (t *Tx) FindingViews(f FindingFilter) ([]FindingView, error) {
-	q := `SELECT f.id, p.name, COALESCE(a.summary, '') FROM findings f
-		JOIN projects p ON p.id = f.project_id
-		LEFT JOIN advisories a ON a.id = f.advisory_id
-		WHERE (? = 0 OR f.project_id = ?) AND (? OR f.resolved_at IS NULL)
-		ORDER BY f.resolved_at IS NOT NULL,
-		  CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'unknown' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
-		  p.name, f.advisory_id`
-	rows, err := t.tx.Query(q, f.ProjectID, f.ProjectID, f.IncludeResolved)
+	fs, err := t.findings(`(? = 0 OR project_id = ?) AND (? OR resolved_at IS NULL)`, f.ProjectID, f.ProjectID, f.IncludeResolved)
 	if err != nil {
 		return nil, err
 	}
-	type head struct {
-		id               int64
-		project, summary string
-	}
-	var heads []head
-	for rows.Next() {
-		var h head
-		if err := rows.Scan(&h.id, &h.project, &h.summary); err != nil {
-			rows.Close()
-			return nil, err
+	names := map[int64]string{}
+	out := make([]FindingView, 0, len(fs))
+	for _, fd := range fs {
+		name, ok := names[fd.ProjectID]
+		if !ok {
+			if name, err = t.ProjectName(fd.ProjectID); err != nil {
+				return nil, err
+			}
+			names[fd.ProjectID] = name
 		}
-		heads = append(heads, h)
+		out = append(out, FindingView{Finding: fd, Project: name})
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]FindingView, 0, len(heads))
-	for _, h := range heads {
-		fd, err := t.FindingByID(h.id)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, FindingView{Finding: fd, Project: h.project, Summary: h.summary})
-	}
+	slices.SortStableFunc(out, func(a, b FindingView) int {
+		return cmp.Or(compareBool(a.ResolvedAt != "", b.ResolvedAt != ""), cmp.Compare(severityRank(a.Severity), severityRank(b.Severity)),
+			cmp.Compare(a.Project, b.Project), cmp.Compare(a.VulnID, b.VulnID))
+	})
 	return out, nil
 }
 
-// AdvisoryModified returns an advisory's modified time.
-func (t *Tx) AdvisoryModified(id string) (string, error) {
-	var m string
-	err := t.tx.QueryRow(`SELECT modified FROM advisories WHERE id = ?`, id).Scan(&m)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+// severityRank orders severities for review: unknown sits between high and
+// medium because it may be either.
+func severityRank(s string) int {
+	switch s {
+	case "critical":
+		return 0
+	case "high":
+		return 1
+	case "unknown":
+		return 2
+	case "medium":
+		return 3
 	}
-	return m, err
+	return 4
 }
 
 // PruneReports deletes report log entries received before cutoff (RFC 3339).
@@ -153,4 +142,14 @@ func (t *Tx) PruneReports(cutoff string) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
