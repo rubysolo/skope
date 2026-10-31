@@ -87,7 +87,7 @@ jobs:
   report:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rubysolo/skope/report@v0
         with:
           url: ${{ vars.SKOPE_URL }}
