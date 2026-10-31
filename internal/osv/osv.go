@@ -14,10 +14,14 @@ import (
 
 // Advisory is the subset of the OSV schema Skope uses.
 type Advisory struct {
-	ID               string           `json:"id"`
-	Modified         string           `json:"modified"`
-	Withdrawn        string           `json:"withdrawn,omitempty"`
-	Aliases          []string         `json:"aliases,omitempty"`
+	ID        string   `json:"id"`
+	Modified  string   `json:"modified"`
+	Withdrawn string   `json:"withdrawn,omitempty"`
+	Aliases   []string `json:"aliases,omitempty"`
+	// Upstream names the vulnerabilities this advisory derives from. Distro
+	// advisories (ALPINE-CVE-…, DEBIAN-CVE-…) list their CVE here, not in
+	// Aliases; Skope treats both as other names for the same vulnerability.
+	Upstream         []string         `json:"upstream,omitempty"`
 	Summary          string           `json:"summary,omitempty"`
 	Scores           []SeverityScore  `json:"severity,omitempty"`
 	Affected         []Affected       `json:"affected,omitempty"`
@@ -25,10 +29,16 @@ type Advisory struct {
 }
 
 type Affected struct {
-	Package  Package         `json:"package"`
-	Ranges   []Range         `json:"ranges,omitempty"`
-	Versions []string        `json:"versions,omitempty"`
-	Severity []SeverityScore `json:"severity,omitempty"`
+	Package           Package           `json:"package"`
+	Ranges            []Range           `json:"ranges,omitempty"`
+	Versions          []string          `json:"versions,omitempty"`
+	Severity          []SeverityScore   `json:"severity,omitempty"`
+	EcosystemSpecific EcosystemSpecific `json:"ecosystem_specific,omitzero"`
+}
+
+// EcosystemSpecific holds the per-package fields Skope reads.
+type EcosystemSpecific struct {
+	Urgency string `json:"urgency,omitempty"` // Debian: unimportant/low/medium/high/not yet assigned
 }
 
 type Package struct {
@@ -68,6 +78,30 @@ func Parse(data []byte) (*Advisory, error) {
 	return &a, nil
 }
 
+// OtherIDs is every other identifier the advisory's vulnerability is known
+// by: its aliases and its upstream ids.
+func (a *Advisory) OtherIDs() []string {
+	return append(append([]string{}, a.Aliases...), a.Upstream...)
+}
+
+// Compact drops what Skope never needs from a distribution's entries: the
+// enumerated versions list beside an ECOSYSTEM range, which the range already
+// decides. Debian's lists are three quarters of its export. (Checked
+// 2026-10-30 over all 7.3M Alpine and Debian listed versions: none fell
+// outside their entry's ranges. Language ecosystems keep their lists; some do
+// list versions their ranges miss.)
+func (a *Advisory) Compact() *Advisory {
+	c := *a
+	c.Affected = make([]Affected, len(a.Affected))
+	for i, af := range a.Affected {
+		if pkgid.IsOS(af.Package.Ecosystem) && slices.ContainsFunc(af.Ranges, func(r Range) bool { return r.Type == "ECOSYSTEM" }) {
+			af.Versions = nil
+		}
+		c.Affected[i] = af
+	}
+	return &c
+}
+
 // Malicious reports whether the advisory is a Malicious Package Advisory.
 func (a *Advisory) Malicious() bool { return strings.HasPrefix(a.ID, "MAL-") }
 
@@ -82,8 +116,8 @@ type PackageRef struct {
 func (a *Advisory) Packages() []PackageRef {
 	var refs []PackageRef
 	for _, af := range a.Affected {
-		eco := baseEcosystem(af.Package.Ecosystem)
-		if af.Package.Name == "" || !slices.Contains(pkgid.Ecosystems(), eco) {
+		eco := ecosystem(af.Package.Ecosystem)
+		if af.Package.Name == "" || !slices.Contains(pkgid.SyncEcosystems(), pkgid.SyncBase(eco)) {
 			continue
 		}
 		ref := PackageRef{Ecosystem: eco, Key: pkgid.NameKey(eco, af.Package.Name)}
@@ -94,39 +128,53 @@ func (a *Advisory) Packages() []PackageRef {
 	return refs
 }
 
+// Match is how an advisory applies to one package version.
+type Match struct {
+	Affected bool
+	// Fixable reports that the advisory names a version that fixes it: the
+	// affected window the version sits in is closed by a "fixed" event. A
+	// last_affected bound or a bare versions list names no fix.
+	Fixable bool
+}
+
 // Affects reports whether p's version falls in any of the advisory's affected
-// versions or SEMVER/ECOSYSTEM ranges. GIT ranges can't be evaluated against a
-// registry version and are ignored.
-func (a *Advisory) Affects(p pkgid.Package) (bool, error) {
+// versions or SEMVER/ECOSYSTEM ranges, and whether a fix is published. GIT
+// ranges can't be evaluated against a registry version and are ignored.
+func (a *Advisory) Affects(p pkgid.Package) (Match, error) {
+	var m Match
 	if a.Withdrawn != "" {
-		return false, nil
+		return m, nil
 	}
 	for _, af := range a.Affected {
-		eco := baseEcosystem(af.Package.Ecosystem)
+		eco := ecosystem(af.Package.Ecosystem)
 		if eco != p.Ecosystem || pkgid.NameKey(eco, af.Package.Name) != p.Key() {
 			continue
 		}
 		if slices.Contains(af.Versions, p.Version) {
-			return true, nil
+			m.Affected = true
 		}
 		for _, r := range af.Ranges {
 			if r.Type != "SEMVER" && r.Type != "ECOSYSTEM" {
 				continue
 			}
-			hit, err := inRange(r, eco, p.Version)
+			hit, fixable, err := inRange(r, pkgid.SyncBase(eco), p.Version)
 			if err != nil {
-				return false, fmt.Errorf("%s: %s: %w", a.ID, p, err)
+				return Match{}, fmt.Errorf("%s: %s: %w", a.ID, p, err)
 			}
-			if hit {
-				return true, nil
-			}
+			m.Affected = m.Affected || hit
+			m.Fixable = m.Fixable || (hit && fixable)
 		}
 	}
-	return false, nil
+	return m, nil
 }
 
-// baseEcosystem drops OSV's ":suffix" qualifiers (e.g. "Debian:11").
-func baseEcosystem(e string) string {
+// ecosystem normalises an affected package's ecosystem to how Skope names
+// packages: a distribution keeps its release ("Debian:12"), since advisories
+// differ per release; a language registry drops OSV's ":suffix" qualifiers.
+func ecosystem(e string) string {
+	if pkgid.IsOS(e) {
+		return e
+	}
 	base, _, _ := strings.Cut(e, ":")
 	return base
 }
@@ -137,8 +185,9 @@ type parsedEvent struct {
 }
 
 // inRange evaluates one range: events are sorted by version and the last one
-// at or below v decides whether v is inside an affected window.
-func inRange(r Range, ecosystem, version string) (bool, error) {
+// at or below v decides whether v is inside an affected window. The window is
+// fixable when the next event above v is a fix.
+func inRange(r Range, ecosystem, version string) (affected, fixable bool, err error) {
 	parse := func(s string) (semantic.Version, error) {
 		if r.Type == "SEMVER" {
 			return semantic.ParseSemverVersion(s), nil
@@ -147,7 +196,7 @@ func inRange(r Range, ecosystem, version string) (bool, error) {
 	}
 	v, err := parse(version)
 	if err != nil {
-		return false, fmt.Errorf("parse version %q: %w", version, err)
+		return false, false, fmt.Errorf("parse version %q: %w", version, err)
 	}
 
 	events := make([]parsedEvent, 0, len(r.Events))
@@ -167,7 +216,7 @@ func inRange(r Range, ecosystem, version string) (bool, error) {
 		}
 		ev, err := parse(raw)
 		if err != nil {
-			return false, fmt.Errorf("parse event %q: %w", raw, err)
+			return false, false, fmt.Errorf("parse event %q: %w", raw, err)
 		}
 		events = append(events, parsedEvent{v: ev, kind: kind})
 	}
@@ -188,16 +237,20 @@ func inRange(r Range, ecosystem, version string) (bool, error) {
 		return c
 	})
 	if sortErr != nil {
-		return false, sortErr
+		return false, false, sortErr
 	}
 
-	affected := false
 	for _, e := range events {
 		c := 1 // version vs. event; "0" is below everything
 		if e.v != nil {
 			if c, err = v.Compare(e.v); err != nil {
-				return false, err
+				return false, false, err
 			}
+		}
+		if c < 0 {
+			// The first event above v closes (or doesn't) the window v is in.
+			fixable = affected && e.kind == "fixed"
+			break
 		}
 		switch e.kind {
 		case "introduced":
@@ -214,5 +267,5 @@ func inRange(r Range, ecosystem, version string) (bool, error) {
 			}
 		}
 	}
-	return affected, nil
+	return affected, affected && fixable, nil
 }

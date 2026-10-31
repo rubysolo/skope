@@ -1,7 +1,8 @@
 name: Action
 
 # Runs the report action against a skope server started in the job, using a
-# fixture whose lockfile pins known-vulnerable Hex packages.
+# fixture whose lockfile pins known-vulnerable Hex packages, and an image
+# built on an old Alpine release.
 on:
   push:
     branches:
@@ -17,22 +18,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # GitHub evaluates ${{ }} even in an action's descriptions, and one there
+      # stops the action from loading at all.
+      - name: No expressions in the action's descriptions
+        run: '! grep -nE "description:.*[$][{][{]" report/action.yml'
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Start skope (Hex only)
+      - name: Start skope (Hex and Alpine)
         id: server
         run: |
           go build -o "$RUNNER_TEMP/skope" .
           admin=$(openssl rand -hex 32)
           echo "::add-mask::$admin"
-          SKOPE_ADMIN_TOKEN=$admin SKOPE_DB="$RUNNER_TEMP/skope.db" SKOPE_ECOSYSTEMS=Hex \
+          SKOPE_ADMIN_TOKEN=$admin SKOPE_DB="$RUNNER_TEMP/skope.db" SKOPE_ECOSYSTEMS=Hex,Alpine \
             "$RUNNER_TEMP/skope" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
-          for _ in $(seq 1 60); do grep -q "synced ecosystem=Hex" "$RUNNER_TEMP/serve.log" && break; sleep 1; done
+          for _ in $(seq 1 90); do grep -q "synced ecosystem=Alpine" "$RUNNER_TEMP/serve.log" && break; sleep 1; done
           cat "$RUNNER_TEMP/serve.log"
-          grep -q "synced ecosystem=Hex" "$RUNNER_TEMP/serve.log"
+          grep -q "synced ecosystem=Alpine" "$RUNNER_TEMP/serve.log"
           token=$(SKOPE_URL=http://127.0.0.1:8080 SKOPE_ADMIN_TOKEN=$admin "$RUNNER_TEMP/skope" project add fixture)
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -80,3 +86,37 @@ jobs:
       - name: Expect pull requests to be skipped
         if: github.event_name == 'pull_request'
         run: test -z "${{ steps.guarded.outputs.findings }}"
+
+      - name: Build an image on an old Alpine release
+        run: printf 'FROM alpine:3.19.1\n' | docker build -t skope-fixture:ci -
+
+      - name: Report the image
+        id: image
+        uses: ./report
+        with:
+          url: http://127.0.0.1:8080
+          token: ${{ steps.server.outputs.token }}
+          image: skope-fixture:ci
+          any-branch: "true"
+
+      - name: Expect image findings on top of the repository's
+        env:
+          REPO_FINDINGS: ${{ steps.report.outputs.findings }}
+          FINDINGS: ${{ steps.image.outputs.findings }}
+          PACKAGES: ${{ steps.image.outputs.packages }}
+        run: |
+          echo "repo=$REPO_FINDINGS project=$FINDINGS image-packages=$PACKAGES"
+          test "$PACKAGES" -ge 5
+          test "$FINDINGS" -gt "$REPO_FINDINGS"
+
+      - name: Report the repository again
+        id: again
+        uses: ./report
+        with:
+          url: http://127.0.0.1:8080
+          token: ${{ steps.server.outputs.token }}
+          path: report/testdata/elixir-app
+          any-branch: "true"
+
+      - name: Expect the image's findings to survive a repository report
+        run: test "${{ steps.again.outputs.findings }}" = "${{ steps.image.outputs.findings }}"

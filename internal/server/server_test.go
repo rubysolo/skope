@@ -314,3 +314,20 @@ func TestSetEcosystems(t *testing.T) {
 		t.Errorf("misspelled ecosystem: %v", err)
 	}
 }
+
+func TestReportSource(t *testing.T) {
+	h := newHarness(t)
+	token := h.createProject("cure")
+	for _, bad := range []string{"image:", "image:Bad Name", "docker:ghcr.io/x", "nope"} {
+		if resp, _ := h.do("POST", "/v1/reports", token, `{"packages": ["pkg:hex/plug@1.2.0"]}`, api.HeaderSource, bad); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("source %q: %d, want 400", bad, resp.StatusCode)
+		}
+	}
+	h.report(token, `"pkg:hex/plug@1.2.0"`)
+	resp, body := h.do("POST", "/v1/reports", token, `{"packages": ["pkg:hex/phoenix@1.7.14"]}`, api.HeaderSource, "image:ghcr.io/rubysolo/cure")
+	var res api.ReportResult
+	json.Unmarshal(body, &res)
+	if resp.StatusCode != http.StatusOK || len(res.Findings) != 1 || res.Findings[0].Sources[0] != "repo" || !res.Findings[0].Fixable {
+		t.Errorf("an image report keeps the repo's findings: %d %s", resp.StatusCode, body)
+	}
+}

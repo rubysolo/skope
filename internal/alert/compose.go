@@ -11,6 +11,7 @@ import (
 
 	"github.com/rubysolo/skope/internal/api"
 	"github.com/rubysolo/skope/internal/osv"
+	"github.com/rubysolo/skope/internal/pkgid"
 	"github.com/rubysolo/skope/internal/scan"
 	"github.com/rubysolo/skope/internal/store"
 )
@@ -120,8 +121,21 @@ func (v *vuln) projects() []string {
 
 // urgent reports whether a change deserves a phone push: a finding coming
 // into view that is malicious, high/critical, or unrated.
+//
+// OS-package findings push only when high or critical: distributions leave
+// many advisories unrated, and an unrated one in a base image can wait for
+// email.
 func urgent(c scan.Change) bool {
-	return c.Kind.Active() && (c.Malicious() || c.Severity.Urgent())
+	if !c.Kind.Active() {
+		return false
+	}
+	if c.Malicious() {
+		return true
+	}
+	if pkgid.IsOS(c.Ecosystem) {
+		return c.Severity >= osv.High
+	}
+	return c.Severity.Urgent()
 }
 
 func plural(n int, one, many string) string {
@@ -157,6 +171,7 @@ func ComposeEmail(changes []scan.Change) (e Email, ok bool) {
 		kinds []scan.Kind
 	}{
 		{"NEW", []scan.Kind{scan.Opened}},
+		{"FIX AVAILABLE", []scan.Kind{scan.FixAvailable}},
 		{"BACK ON YOUR LIST", []scan.Kind{scan.Reactivated, scan.IgnoreExpired}},
 		{"RESOLVED", []scan.Kind{scan.Resolved}},
 	}
@@ -205,6 +220,8 @@ func ComposeEmail(changes []scan.Change) (e Email, ok bool) {
 		subject = "MALICIOUS package in " + strings.Join(projects, ", ")
 	case counts["NEW"] > 0:
 		subject = plural(counts["NEW"], "new vulnerability", "new vulnerabilities") + " in " + strings.Join(projects, ", ")
+	case counts["FIX AVAILABLE"] > 0:
+		subject = "fix available for " + plural(counts["FIX AVAILABLE"], "vulnerability", "vulnerabilities") + " in " + strings.Join(projects, ", ")
 	case counts["BACK ON YOUR LIST"] > 0:
 		subject = plural(counts["BACK ON YOUR LIST"], "vulnerability needs", "vulnerabilities need") + " another look in " + strings.Join(projects, ", ")
 	default:
@@ -244,10 +261,15 @@ func writeVuln(b *strings.Builder, v *vuln, perLineReport bool) {
 		switch c.Kind {
 		case scan.Resolved:
 			line = fmt.Sprintf("  #%d  %s  %s %s (was %s)", c.FindingID, c.Project, c.Ecosystem, c.Name, c.Versions)
+		case scan.FixAvailable:
+			line += "  (a fixed version is now published)"
 		case scan.Reactivated:
 			line += "  (advisory changed since you ignored it)"
 		case scan.IgnoreExpired:
 			line += "  (ignore expired)"
+		}
+		if images := imageSources(c); len(images) > 0 {
+			line += "\n      in image " + strings.Join(images, ", ")
 		}
 		if perLineReport && c.Report.Commit != "" {
 			line += "\n      introduced by commit " + short(c.Report.Commit)
@@ -259,6 +281,9 @@ func writeVuln(b *strings.Builder, v *vuln, perLineReport bool) {
 	}
 	if len(v.aliases) > 0 {
 		fmt.Fprintf(b, "  Also known as: %s\n", strings.Join(v.aliases, ", "))
+	}
+	if v.kind.Active() && slices.ContainsFunc(v.changes, func(c scan.Change) bool { return pkgid.IsOS(c.Ecosystem) }) {
+		b.WriteString("  Rebuild the image (or bump its base image) to pick up the fix.\n")
 	}
 	fmt.Fprintf(b, "  %s\n\n", v.url)
 }
@@ -330,4 +355,15 @@ func ComposeStale(projects []store.StaleProject, now time.Time) (Email, Push) {
 	subject := plural(len(projects), "project has", "projects have") + " stopped reporting: " + list
 	return Email{Subject: "[skope] " + subject, Body: b.String()},
 		Push{Title: "skope: " + subject, Message: "Check CI, or `skope project archive` retired projects.", Priority: 3, Tags: []string{"hourglass"}}
+}
+
+// imageSources names the container images a change was found in.
+func imageSources(c scan.Change) []string {
+	var images []string
+	for _, src := range c.Sources {
+		if name, ok := strings.CutPrefix(src, "image:"); ok {
+			images = append(images, name)
+		}
+	}
+	return images
 }

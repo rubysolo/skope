@@ -132,3 +132,42 @@ func TestEmailReportContextPerLineWhenMixed(t *testing.T) {
 		t.Errorf("mixed commits go per line:\n%s", e.Body)
 	}
 }
+
+func osChange(kind scan.Kind, sev osv.Severity) scan.Change {
+	return scan.Change{Kind: kind, FindingID: 9, Project: "cure", VulnID: "CVE-2026-9", Severity: sev, Fixable: true,
+		Advisories: []*osv.Advisory{adv("DEBIAN-CVE-2026-9", "openssl bug", "CVE-2026-9")},
+		Ecosystem:  "Debian:12", Name: "openssl", Versions: "3.0.17-1~deb12u2", Sources: []string{"image:ghcr.io/x/cure"}}
+}
+
+func TestOSPackagePushes(t *testing.T) {
+	for _, c := range []struct {
+		sev  osv.Severity
+		push bool
+	}{{osv.Unknown, false}, {osv.Medium, false}, {osv.High, true}, {osv.Critical, true}} {
+		if _, ok := ComposePush([]scan.Change{osChange(scan.Opened, c.sev)}); ok != c.push {
+			t.Errorf("OS finding at %v: push=%v, want %v", c.sev, ok, c.push)
+		}
+	}
+	if _, ok := ComposePush([]scan.Change{osChange(scan.FixAvailable, osv.Critical)}); !ok {
+		t.Error("a critical fix becoming available pushes")
+	}
+}
+
+func TestEmailFixAvailableAndImages(t *testing.T) {
+	e, ok := ComposeEmail([]scan.Change{osChange(scan.FixAvailable, osv.High)})
+	if !ok || e.Subject != "[skope] fix available for 1 vulnerability in cure" {
+		t.Fatalf("subject = %q", e.Subject)
+	}
+	for _, want := range []string{
+		"FIX AVAILABLE\n\n[HIGH] CVE-2026-9: openssl bug\n",
+		"  #9  cure  Debian:12 openssl 3.0.17-1~deb12u2  (a fixed version is now published)\n      in image ghcr.io/x/cure\n",
+		"  Rebuild the image (or bump its base image) to pick up the fix.\n",
+	} {
+		if !strings.Contains(e.Body, want) {
+			t.Errorf("body missing %q:\n%s", want, e.Body)
+		}
+	}
+	if e, _ := ComposeEmail([]scan.Change{change(scan.Opened, 1, "cure", "CVE-1", osv.High, adv("GHSA-1", ""))}); strings.Contains(e.Body, "in image") || strings.Contains(e.Body, "Rebuild") {
+		t.Errorf("repo findings mention no image:\n%s", e.Body)
+	}
+}

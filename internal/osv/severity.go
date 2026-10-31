@@ -44,7 +44,7 @@ func (s Severity) Urgent() bool { return s == Unknown || s >= High }
 
 // Severity rates the advisory: Malicious Package Advisories are always
 // critical; otherwise the highest CVSS score among its vectors, falling back
-// to GHSA's label.
+// to GHSA's label, then to the highest Debian urgency.
 func (a *Advisory) Severity() Severity {
 	if a.Malicious() {
 		return Critical
@@ -62,7 +62,18 @@ func (a *Advisory) Severity() Severity {
 	if best >= 0 {
 		return fromScore(best)
 	}
-	return ParseSeverity(a.DatabaseSpecific.Severity)
+	if s := ParseSeverity(a.DatabaseSpecific.Severity); s != Unknown {
+		return s
+	}
+	urgency := Unknown
+	for _, af := range a.Affected {
+		u := af.EcosystemSpecific.Urgency
+		if u == "unimportant" {
+			u = "low"
+		}
+		urgency = max(urgency, ParseSeverity(u))
+	}
+	return urgency
 }
 
 func cvssScore(s SeverityScore) (float64, bool) {

@@ -49,6 +49,12 @@ func TestVulnGroupFollowsAliasesTransitively(t *testing.T) {
 		if g, _ := tx.VulnGroup("GO-2025-4011"); g.Key != "GO-2025-4011" {
 			t.Errorf("key = %q, want the advisory id when there is no CVE", g.Key)
 		}
+		// Distro advisories name their CVE as upstream, not as an alias.
+		tx.UpsertAdvisory(&osv.Advisory{ID: "ALPINE-CVE-2024-5535", Modified: "m", Upstream: []string{"CVE-2024-5535"}})
+		tx.UpsertAdvisory(&osv.Advisory{ID: "DEBIAN-CVE-2024-5535", Modified: "m", Upstream: []string{"CVE-2024-5535"}})
+		if g, _ := tx.VulnGroup("ALPINE-CVE-2024-5535"); g.Key != "CVE-2024-5535" || len(g.Advisories) != 2 {
+			t.Errorf("upstream ids group like aliases: %+v", g)
+		}
 		if _, err := tx.VulnGroup("CVE-0000-0"); !errors.Is(err, ErrNotFound) {
 			t.Errorf("unknown id: %v", err)
 		}
@@ -68,7 +74,7 @@ func TestVulnGroupFollowsAliasesTransitively(t *testing.T) {
 	})
 }
 
-func TestMigrationV2BackfillsAliasesAndKeys(t *testing.T) {
+func TestMigrationsFromV1(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "skope.db")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
@@ -81,6 +87,7 @@ func TestMigrationV2BackfillsAliasesAndKeys(t *testing.T) {
 		`INSERT INTO advisories (id, modified, severity, raw) VALUES ('GHSA-aaaa', 'm', 'high', CAST('{"id":"GHSA-aaaa","aliases":["CVE-2026-1"]}' AS BLOB))`,
 		`INSERT INTO findings (project_id, advisory_id, ecosystem, name_key, name, versions, severity, opened_at)
 		   VALUES (1, 'GHSA-aaaa', 'Hex', 'plug', 'plug', '1.0.0', 'high', '2026-01-01')`,
+		`INSERT INTO inventory (project_id, ecosystem, name_key, name, version) VALUES (1, 'Hex', 'plug', 'plug', '1.0.0')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -98,8 +105,11 @@ func TestMigrationV2BackfillsAliasesAndKeys(t *testing.T) {
 			t.Errorf("aliases not backfilled: %+v %v", g, err)
 		}
 		fs, _ := tx.OpenFindingsForProject(1)
-		if len(fs) != 1 || fs[0].VulnID != "GHSA-aaaa" || fs[0].AdvisoryIDs != "GHSA-aaaa" {
-			t.Errorf("finding after migration: %+v", fs)
+		if len(fs) != 1 || fs[0].VulnID != "GHSA-aaaa" || fs[0].AdvisoryIDs != "GHSA-aaaa" || fs[0].Sources != "repo" || !fs[0].Fixable {
+			t.Errorf("finding after migrations: %+v", fs)
+		}
+		if inv, _ := tx.Inventory(1); len(inv) != 1 || inv[0].Source != "repo" || inv[0].Package.Name != "plug" {
+			t.Errorf("inventory after migration 3: %+v", inv)
 		}
 		return nil
 	})

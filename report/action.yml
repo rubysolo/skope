@@ -15,8 +15,11 @@ inputs:
   path:
     description: Directory to scan, for monorepos with one skope project per app.
     default: .
+  image:
+    description: Container image to scan instead of the checkout (e.g. ghcr.io/me/app:<commit sha>), from the local Docker daemon or a registry. Reported as its own source, so it doesn't replace the repository's report.
+    default: ""
   fail-on:
-    description: Fail the step when an open, unignored finding is at least this severe (low, medium, high, critical). Empty never fails.
+    description: Fail the step when an open, unignored finding with a fix is at least this severe (low, medium, high, critical). Empty never fails.
     default: ""
   exclude:
     description: Comma-separated syft exclude globs. The default skips build output and installed-dependency directories, whose binaries aren't what the lockfiles describe.
@@ -30,7 +33,7 @@ inputs:
 
 outputs:
   findings:
-    description: Number of open, unignored findings.
+    description: Number of open, unignored findings that have a fix.
     value: ${{ steps.report.outputs.findings }}
   packages:
     description: Number of packages reported.
@@ -64,6 +67,7 @@ runs:
         SKOPE_URL: ${{ inputs.url }}
         SKOPE_TOKEN: ${{ inputs.token }}
         SKOPE_PATH: ${{ inputs.path }}
+        SKOPE_IMAGE: ${{ inputs.image }}
         SKOPE_EXCLUDE: ${{ inputs.exclude }}
         SKOPE_FAIL_ON: ${{ inputs.fail-on }}
         SKOPE_COMMIT: ${{ github.sha }}

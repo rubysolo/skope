@@ -27,8 +27,11 @@ var schemaV1 string
 //go:embed schema_v2.sql
 var schemaV2 string
 
+//go:embed schema_v3.sql
+var schemaV3 string
+
 // migrations[i] takes the database from user_version i to i+1.
-var migrations = []string{schemaV1, schemaV2}
+var migrations = []string{schemaV1, schemaV2, schemaV3}
 
 var (
 	ErrNotFound = errors.New("not found")
@@ -172,28 +175,43 @@ func (t *Tx) ProjectByToken(token string) (Project, error) {
 
 // --- reports and inventory --------------------------------------------------
 
+// SourceRepo is the source a report comes from unless it names another: the
+// project repository's lockfiles. Container images are "image:<name>".
+const SourceRepo = "repo"
+
 type ReportMeta struct {
+	// Source is where the packages were read from; "" means SourceRepo.
+	Source              string
 	Commit, Ref, RunURL string
 }
 
-// RecordReport replaces the project's inventory and logs the report.
+func (m ReportMeta) source() string {
+	if m.Source == "" {
+		return SourceRepo
+	}
+	return m.Source
+}
+
+// RecordReport replaces the report's source's part of the project's inventory
+// and logs the report.
 func (t *Tx) RecordReport(projectID int64, meta ReportMeta, pkgs []pkgid.Package) (int64, error) {
-	res, err := t.tx.Exec(`INSERT INTO reports (project_id, received_at, commit_sha, ref, run_url, package_count)
-		VALUES (?, ?, ?, ?, ?, ?)`, projectID, t.now, meta.Commit, meta.Ref, meta.RunURL, len(pkgs))
+	source := meta.source()
+	res, err := t.tx.Exec(`INSERT INTO reports (project_id, source, received_at, commit_sha, ref, run_url, package_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, projectID, source, t.now, meta.Commit, meta.Ref, meta.RunURL, len(pkgs))
 	if err != nil {
 		return 0, err
 	}
 	reportID, _ := res.LastInsertId()
-	if _, err := t.tx.Exec(`DELETE FROM inventory WHERE project_id = ?`, projectID); err != nil {
+	if _, err := t.tx.Exec(`DELETE FROM inventory WHERE project_id = ? AND source = ?`, projectID, source); err != nil {
 		return 0, err
 	}
-	stmt, err := t.tx.Prepare(`INSERT OR IGNORE INTO inventory (project_id, ecosystem, name_key, name, version) VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := t.tx.Prepare(`INSERT OR IGNORE INTO inventory (project_id, source, ecosystem, name_key, name, version) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return 0, err
 	}
 	defer stmt.Close()
 	for _, p := range pkgs {
-		if _, err := stmt.Exec(projectID, p.Ecosystem, p.Key(), p.Name, p.Version); err != nil {
+		if _, err := stmt.Exec(projectID, source, p.Ecosystem, p.Key(), p.Name, p.Version); err != nil {
 			return 0, err
 		}
 	}
@@ -201,36 +219,17 @@ func (t *Tx) RecordReport(projectID int64, meta ReportMeta, pkgs []pkgid.Package
 	return reportID, err
 }
 
-// InventoryEntry is an inventory package together with its project.
+// InventoryEntry is an inventory package together with its project and source.
 type InventoryEntry struct {
 	ProjectID int64
+	Source    string
 	Package   pkgid.Package
 }
 
-// Inventory returns a project's current packages.
-func (t *Tx) Inventory(projectID int64) ([]pkgid.Package, error) {
-	rows, err := t.tx.Query(`SELECT ecosystem, name, version FROM inventory WHERE project_id = ? ORDER BY ecosystem, name_key, version`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []pkgid.Package
-	for rows.Next() {
-		var p pkgid.Package
-		if err := rows.Scan(&p.Ecosystem, &p.Name, &p.Version); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-// InventoryUsing returns every package version, across active projects, that
-// is the given package.
-func (t *Tx) InventoryUsing(ref osv.PackageRef) ([]InventoryEntry, error) {
-	rows, err := t.tx.Query(`SELECT i.project_id, i.ecosystem, i.name, i.version
+func (t *Tx) inventory(where string, args ...any) ([]InventoryEntry, error) {
+	rows, err := t.tx.Query(`SELECT i.project_id, i.source, i.ecosystem, i.name, i.version
 		FROM inventory i JOIN projects p ON p.id = i.project_id
-		WHERE i.ecosystem = ? AND i.name_key = ? AND p.archived_at IS NULL`, ref.Ecosystem, ref.Key)
+		WHERE `+where+` ORDER BY i.project_id, i.source, i.ecosystem, i.name_key, i.version`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -238,12 +237,23 @@ func (t *Tx) InventoryUsing(ref osv.PackageRef) ([]InventoryEntry, error) {
 	var out []InventoryEntry
 	for rows.Next() {
 		var e InventoryEntry
-		if err := rows.Scan(&e.ProjectID, &e.Package.Ecosystem, &e.Package.Name, &e.Package.Version); err != nil {
+		if err := rows.Scan(&e.ProjectID, &e.Source, &e.Package.Ecosystem, &e.Package.Name, &e.Package.Version); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// Inventory returns a project's current packages from every source.
+func (t *Tx) Inventory(projectID int64) ([]InventoryEntry, error) {
+	return t.inventory(`i.project_id = ?`, projectID)
+}
+
+// InventoryUsing returns every package version, across active projects, that
+// is the given package.
+func (t *Tx) InventoryUsing(ref osv.PackageRef) ([]InventoryEntry, error) {
+	return t.inventory(`i.ecosystem = ? AND i.name_key = ? AND p.archived_at IS NULL`, ref.Ecosystem, ref.Key)
 }
 
 // LatestReportID returns the project's most recent report, or 0.
@@ -268,7 +278,7 @@ func (t *Tx) UpsertAdvisory(a *osv.Advisory) (bool, error) {
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return false, err
 	}
-	raw, err := json.Marshal(a)
+	raw, err := json.Marshal(a.Compact())
 	if err != nil {
 		return false, err
 	}
@@ -288,7 +298,7 @@ func (t *Tx) UpsertAdvisory(a *osv.Advisory) (bool, error) {
 	if _, err := t.tx.Exec(`DELETE FROM advisory_aliases WHERE advisory_id = ?`, a.ID); err != nil {
 		return false, err
 	}
-	for _, alias := range append([]string{a.ID}, a.Aliases...) {
+	for _, alias := range append([]string{a.ID}, a.OtherIDs()...) {
 		if _, err := t.tx.Exec(`INSERT OR IGNORE INTO advisory_aliases (alias, advisory_id) VALUES (?, ?)`, alias, a.ID); err != nil {
 			return false, err
 		}
@@ -364,13 +374,17 @@ type Finding struct {
 	// VulnID keys the vulnerability: the smallest identifier in its alias group.
 	VulnID string
 	// AdvisoryIDs lists the group's advisories that matched, comma-separated.
-	AdvisoryIDs   string
-	Summary       string
-	Ecosystem     string
-	NameKey       string
-	Name          string
-	Versions      string
-	Severity      string
+	AdvisoryIDs string
+	Summary     string
+	Ecosystem   string
+	NameKey     string
+	Name        string
+	Versions    string
+	// Sources lists the sources containing an affected version, comma-separated.
+	Sources  string
+	Severity string
+	// Fixable is false while no advisory names a fixed version (unfixed).
+	Fixable       bool
 	OpenedAt      string
 	ResolvedAt    string
 	IgnoredReason string
@@ -384,7 +398,7 @@ func (f Finding) Ignored(now string) bool {
 	return f.IgnoredReason != "" && (f.IgnoredUntil == "" || f.IgnoredUntil > now)
 }
 
-const findingCols = `id, project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, severity, opened_at,
+const findingCols = `id, project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, sources, severity, fixable, opened_at,
 	COALESCE(resolved_at, ''), COALESCE(ignored_reason, ''), COALESCE(ignored_until, ''), COALESCE(ignored_modified, '')`
 
 func (t *Tx) findings(where string, args ...any) ([]Finding, error) {
@@ -397,7 +411,7 @@ func (t *Tx) findings(where string, args ...any) ([]Finding, error) {
 	for rows.Next() {
 		var f Finding
 		if err := rows.Scan(&f.ID, &f.ProjectID, &f.VulnID, &f.AdvisoryIDs, &f.Summary, &f.Ecosystem, &f.NameKey, &f.Name, &f.Versions,
-			&f.Severity, &f.OpenedAt, &f.ResolvedAt, &f.IgnoredReason, &f.IgnoredUntil, &f.IgnoredModified); err != nil {
+			&f.Sources, &f.Severity, &f.Fixable, &f.OpenedAt, &f.ResolvedAt, &f.IgnoredReason, &f.IgnoredUntil, &f.IgnoredModified); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -429,9 +443,9 @@ func (t *Tx) InsertFinding(f Finding, reportID int64) (int64, error) {
 	if reportID != 0 {
 		rid = reportID
 	}
-	res, err := t.tx.Exec(`INSERT INTO findings (project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, severity, opened_at, introduced_report_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.ProjectID, f.VulnID, f.AdvisoryIDs, f.Summary, f.Ecosystem, f.NameKey, f.Name, f.Versions, f.Severity, t.now, rid)
+	res, err := t.tx.Exec(`INSERT INTO findings (project_id, vuln_id, advisory_ids, summary, ecosystem, name_key, name, versions, sources, severity, fixable, opened_at, introduced_report_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ProjectID, f.VulnID, f.AdvisoryIDs, f.Summary, f.Ecosystem, f.NameKey, f.Name, f.Versions, f.Sources, f.Severity, f.Fixable, t.now, rid)
 	if err != nil {
 		return 0, err
 	}
@@ -440,8 +454,8 @@ func (t *Tx) InsertFinding(f Finding, reportID int64) (int64, error) {
 
 // UpdateFinding refreshes an open finding's descriptive fields.
 func (t *Tx) UpdateFinding(f Finding) error {
-	_, err := t.tx.Exec(`UPDATE findings SET advisory_ids = ?, summary = ?, versions = ?, severity = ? WHERE id = ?`,
-		f.AdvisoryIDs, f.Summary, f.Versions, f.Severity, f.ID)
+	_, err := t.tx.Exec(`UPDATE findings SET advisory_ids = ?, summary = ?, versions = ?, sources = ?, severity = ?, fixable = ? WHERE id = ?`,
+		f.AdvisoryIDs, f.Summary, f.Versions, f.Sources, f.Severity, f.Fixable, f.ID)
 	return err
 }
 

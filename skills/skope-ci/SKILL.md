@@ -7,7 +7,7 @@ description: Connect a repository to a skope server so its CI reports dependenci
 
 [skope](https://github.com/rubysolo/skope) watches the operator's projects for published vulnerabilities. Each project's CI sends a **report**, an SBOM of its lockfiles, to the skope server. The server matches every **inventory** against OSV advisories and alerts the operator when a **finding** opens. Covered ecosystems: Hex, crates.io, RubyGems, npm, Go modules, PyPI.
 
-Your job is to register the repository as a skope **project**, store its **project token** as a CI secret, and add a workflow that reports on every push to the default branch. Three things matter most:
+Your job is to register the repository as a skope **project**, store its **project token** as a CI secret, and add a workflow that reports on every push to the default branch. If the repo builds container images, you'll also report each built image, so the OS packages inside it (Alpine, Debian) are watched as well. Three things matter most:
 - **Never print, log or write a token anywhere but `gh secret set`.**
 - **Only the default branch reports.** Each report replaces the project's whole inventory, so a feature branch must not send one.
 - **Don't fix vulnerabilities you see** unless the user asks. Report them.
@@ -99,6 +99,27 @@ jobs:
 **Optional inputs**, only if the user asks:
 - `fail-on: high` fails the job when an unignored high or critical finding is open. The default never fails; alerts come by email and ntfy anyway.
 - `exclude:` replaces the default skip list (build output and installed-dependency directories: `_build`, `deps`, `target`, `node_modules`, `vendor`, `dist`, `build`). Change it only if the user's lockfiles live in one of those directories.
+
+## 4b. Report container images (if the repo builds any)
+
+Look for image builds in the existing workflows: `docker build`, `docker/build-push-action` and the like. An image is a separate **source** for the same project, so its report never replaces the lockfile report. Covered base images: **Alpine and Debian** (Ubuntu and others are skipped silently).
+
+Add one step to the job that builds the image, **after** the build or push, in a step that only runs on the default branch:
+
+```yaml
+      - uses: rubysolo/skope/report@v0
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          url: ${{ vars.SKOPE_URL }}
+          token: ${{ secrets.SKOPE_TOKEN }}
+          image: ghcr.io/OWNER/APP:${{ github.sha }}    # the exact tag that job just built or pushed
+```
+
+- **A build with `docker/build-push-action` and `push: true` but no `load: true`:** the image isn't in the runner's Docker daemon, and syft pulls it from the registry instead. That needs the job's registry login to still be in effect, which it is when the step runs later in the same job.
+- **Several images (web, worker):** use one step per image. Each image is its own source.
+- **Don't** add image scanning to `skope.yml`. It has nothing to build, and the hourly sync keeps matching the last reported image against new advisories anyway.
+
+Distro advisories with **no fix yet** are tracked quietly: they appear in `skope finding list` as "no fix yet" and only alert once a fixed package is published. Expect the first image report to show more findings than alerts.
 
 ## 5. Ship it and verify
 

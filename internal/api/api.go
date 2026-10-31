@@ -8,6 +8,10 @@ const (
 	HeaderCommit = "Skope-Commit"
 	HeaderRef    = "Skope-Ref"
 	HeaderRunURL = "Skope-Run-Url"
+	// HeaderSource names where the report's packages were read from: "repo"
+	// (the default) or "image:<name>". A report replaces only its source's
+	// part of the inventory.
+	HeaderSource = "Skope-Source"
 )
 
 type Error struct {
@@ -44,10 +48,13 @@ type Finding struct {
 	Ecosystem     string   `json:"ecosystem"`
 	Package       string   `json:"package"`
 	Versions      string   `json:"versions"`
-	Severity      string   `json:"severity"`
-	OpenedAt      string   `json:"opened_at"`
-	ResolvedAt    string   `json:"resolved_at,omitempty"`
-	Ignored       *Ignored `json:"ignored,omitempty"`
+	Sources       []string `json:"sources"`
+	// Fixable is false while no advisory names a fixed version.
+	Fixable    bool     `json:"fixable"`
+	Severity   string   `json:"severity"`
+	OpenedAt   string   `json:"opened_at"`
+	ResolvedAt string   `json:"resolved_at,omitempty"`
+	Ignored    *Ignored `json:"ignored,omitempty"`
 }
 
 type Ignored struct {
