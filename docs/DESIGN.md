@@ -51,7 +51,7 @@ Project tokens are `skope_`-prefixed random strings, stored as SHA-256 hashes; o
 
 ## CI integration
 
-- Composite action `rubysolo/skope/report@v1`: runs syft on the checkout, posts the report, prints findings, optional `fail-on`.
+- Composite action `rubysolo/skope/report@v0` (a floating major tag that moves with each release, matching the binary's major version): runs syft on the checkout, skipping build output and installed-dependency directories, posts the report, prints findings, optional `fail-on`. Refuses to report from non-default branches unless `any-branch: true`.
 - Triggered on push to the default branch, weekly `schedule:`, and `workflow_dispatch`.
 - Agent skill `skills/skope-ci/SKILL.md`: `skope project add` → `gh secret set SKOPE_TOKEN` → add the workflow. The token is never echoed.
 
